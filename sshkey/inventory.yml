@@ -1,0 +1,20 @@
+all:
+  children:
+    web-servers:
+      hosts:
+        web1:
+          ansible_host: 192.168.5.140
+          ansible_user: vagrant
+          ansible_ssh_pass: vagrant
+        web2:
+          ansible_host: 192.168.5.141
+          ansible_user: vagrant
+          ansible_ssh_pass: vagrant
+    db-servers:
+      hosts:
+        db:
+          ansible_host: 192.168.5.142
+          ansible_user: vagrant
+          ansible_ssh_pass: vagrant
+
+

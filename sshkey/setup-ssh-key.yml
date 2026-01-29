@@ -1,0 +1,10 @@
+---
+- name: Install controller SSH key
+  hosts: all
+  gather_facts: false
+  tasks:
+    - name: Add controller public key
+      authorized_key:
+        user: vagrant
+        state: present
+        key: "{{ lookup('file', '~/.ssh/id_ed25519.pub') }}"
