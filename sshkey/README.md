@@ -1,3 +1,11 @@
+### 1. Generate SSH Key on Controller
+
+If you do not already have an SSH key on the controller:
+
+```bash
+ssh-keygen -t ed25519
+```
+
 ### Add Public Key to Manage nodes
 ANSIBLE_HOST_KEY_CHECKING=False ansible-playbook -i inventory.yml setup-ssh-key.yml
 ### Manual Method
