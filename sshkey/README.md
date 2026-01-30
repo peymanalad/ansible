@@ -19,5 +19,6 @@ ssh-copy-id vagrant@192.168.5.140
 ##
 
 ### Add a User Public Key to Manage nodes (not all of them) 
+```bash
 ansible-playbook -i ansible/inventories/inventory.yml add-ali-key.yml --limit "web1,db"
-
+```
