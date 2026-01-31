@@ -1,0 +1,74 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+# 📦 RabbitMQ Cluster Inventory
+# ═══════════════════════════════════════════════════════════════════════════════
+# 🎯 هدف: تعریف سرورهای RabbitMQ Cluster با 3 گره
+# ═══════════════════════════════════════════════════════════════════════════════
+
+all:
+  vars:
+    ansible_user: root
+    ansible_ssh_private_key_file: ~/.ssh/id_rsa
+    
+    # ═══ RabbitMQ Settings ═══
+    rabbitmq_version: "3.12"
+    rabbitmq_amqp_port: 5672
+    rabbitmq_management_port: 15672
+    rabbitmq_cluster_port: 25672
+    
+    # ═══ Cluster Settings ═══
+    rabbitmq_cluster_name: "production-cluster"
+    rabbitmq_erlang_cookie: "CHANGE_ME_ERLANG_COOKIE_SECRET"
+    
+    # ═══ Users ═══
+    rabbitmq_admin_user: "admin"
+    rabbitmq_admin_password: "CHANGE_ME_ADMIN_PASSWORD"
+    rabbitmq_app_user: "appuser"
+    rabbitmq_app_password: "CHANGE_ME_APP_PASSWORD"
+    
+    # ═══ Virtual Hosts ═══
+    rabbitmq_vhosts:
+      - name: "production"
+        description: "Production Virtual Host"
+      - name: "staging"
+        description: "Staging Virtual Host"
+    
+    # ═══ Memory ═══
+    rabbitmq_vm_memory_high_watermark: 0.6
+    rabbitmq_disk_free_limit: "2GB"
+    
+    # ═══ HA Policy ═══
+    rabbitmq_ha_mode: "all"  # all, exactly, nodes
+    rabbitmq_ha_sync_mode: "automatic"
+
+  children:
+    #---------------------------------------
+    # گره‌های RabbitMQ
+    #---------------------------------------
+    rabbitmq:
+      hosts:
+        rabbit-1:
+          ansible_host: 192.168.1.130
+          rabbitmq_is_master: true
+          
+        rabbit-2:
+          ansible_host: 192.168.1.131
+          rabbitmq_is_master: false
+          
+        rabbit-3:
+          ansible_host: 192.168.1.132
+          rabbitmq_is_master: false
+
+    #---------------------------------------
+    # گره Master (اولین گره)
+    #---------------------------------------
+    rabbitmq_master:
+      hosts:
+        rabbit-1:
+
+    #---------------------------------------
+    # گره‌های Slave
+    #---------------------------------------
+    rabbitmq_slaves:
+      hosts:
+        rabbit-2:
+        rabbit-3:

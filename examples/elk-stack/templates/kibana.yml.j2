@@ -1,0 +1,64 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+# Kibana Configuration
+# ═══════════════════════════════════════════════════════════════════════════════
+
+#---------------------------------------
+# Server Settings
+#---------------------------------------
+server.port: {{ kibana_port }}
+server.host: "{{ ansible_host }}"
+server.name: "{{ kibana_server_name }}"
+
+#---------------------------------------
+# Elasticsearch Connection
+#---------------------------------------
+elasticsearch.hosts:
+{% for host in groups['elasticsearch'] %}
+  - "https://{{ hostvars[host]['ansible_host'] }}:9200"
+{% endfor %}
+
+elasticsearch.username: "kibana_system"
+elasticsearch.password: "{{ es_kibana_password }}"
+
+#---------------------------------------
+# SSL Settings
+#---------------------------------------
+{% if ssl_enabled %}
+elasticsearch.ssl.verificationMode: none
+# اگر certificate دارید:
+# elasticsearch.ssl.certificateAuthorities: [ "{{ ssl_certificate_path }}/ca.crt" ]
+{% endif %}
+
+#---------------------------------------
+# Logging
+#---------------------------------------
+logging:
+  appenders:
+    file:
+      type: file
+      fileName: /var/log/kibana/kibana.log
+      layout:
+        type: json
+  root:
+    appenders:
+      - default
+      - file
+    level: info
+
+#---------------------------------------
+# i18n / Localization
+#---------------------------------------
+# برای زبان فارسی اگر پشتیبانی شد
+# i18n.locale: "fa"
+
+#---------------------------------------
+# Security
+#---------------------------------------
+xpack.security.enabled: true
+xpack.encryptedSavedObjects.encryptionKey: "{{ lookup('password', '/dev/null length=32 chars=ascii_letters,digits') }}"
+
+#---------------------------------------
+# Fleet / Elastic Agent (optional)
+#---------------------------------------
+# xpack.fleet.enabled: true
+# xpack.fleet.agents.fleet_server.hosts: ["https://fleet.example.com:8220"]

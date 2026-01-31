@@ -1,0 +1,42 @@
+---
+# Kubernetes Cluster Initialization
+# راه‌اندازی کلاستر Kubernetes با kubeadm
+
+all:
+  children:
+    k8s_masters:
+      hosts:
+        master-1:
+          ansible_host: 192.168.1.100
+    
+    k8s_workers:
+      hosts:
+        worker-1:
+          ansible_host: 192.168.1.101
+        worker-2:
+          ansible_host: 192.168.1.102
+        worker-3:
+          ansible_host: 192.168.1.103
+  
+  vars:
+    # Kubernetes version
+    k8s_version: "1.29"
+    
+    # Container runtime
+    container_runtime: containerd  # containerd or cri-o
+    
+    # Cluster settings
+    cluster_name: my-cluster
+    pod_network_cidr: "10.244.0.0/16"
+    service_cidr: "10.96.0.0/12"
+    
+    # CNI Plugin
+    cni_plugin: calico  # calico, flannel, or cilium
+    
+    # API Server settings
+    control_plane_endpoint: "192.168.1.100:6443"
+    
+    # Addons
+    install_metrics_server: true
+    install_ingress_nginx: true
+    install_dashboard: true

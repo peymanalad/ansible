@@ -1,0 +1,33 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+# Oracle DBCA Response File
+# ═══════════════════════════════════════════════════════════════════════════════
+
+responseFileVersion=/oracle/assistants/rspfmt_dbca_response_schema_v19.0.0
+gdbName={{ oracle_sid }}
+sid={{ oracle_sid }}
+databaseConfigType=SI
+policyManaged=false
+createServerPool=false
+force=false
+createAsContainerDatabase=true
+numberOfPDBs=1
+pdbName={{ oracle_pdb_name }}
+useLocalUndoForPDBs=true
+pdbAdminPassword={{ oracle_pdbadmin_password }}
+templateName=General_Purpose.dbc
+sysPassword={{ oracle_sys_password }}
+systemPassword={{ oracle_system_password }}
+emConfiguration=DBEXPRESS
+emExpressPort={{ oracle_em_port }}
+dbsnmpPassword={{ oracle_sys_password }}
+datafileDestination={{ oracle_data_path }}
+recoveryAreaDestination={{ oracle_fra_path }}
+recoveryAreaSize={{ oracle_fra_size | regex_replace('G', '000') }}
+storageType=FS
+characterSet={{ oracle_charset }}
+nationalCharacterSet={{ oracle_ncharset }}
+listeners=LISTENER
+memoryPercentage=40
+databaseType=MULTIPURPOSE
+automaticMemoryManagement=false
+totalMemory={{ oracle_memory_target }}

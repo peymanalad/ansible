@@ -1,0 +1,36 @@
+---
+# Server Hardening / Security Playbook
+# امنیت و سخت‌سازی سرور
+
+all:
+  children:
+    servers:
+      hosts:
+        web-1:
+          ansible_host: 192.168.1.10
+        web-2:
+          ansible_host: 192.168.1.11
+        db-1:
+          ansible_host: 192.168.1.20
+  
+  vars:
+    # SSH Settings
+    ssh_port: 2222
+    ssh_permit_root: "no"
+    ssh_password_auth: "no"
+    ssh_x11_forwarding: "no"
+    
+    # Allowed SSH users
+    ssh_allowed_users:
+      - admin
+      - deploy
+    
+    # Firewall - allowed ports
+    firewall_allowed_tcp:
+      - 80
+      - 443
+      - "{{ ssh_port }}"
+    
+    # Fail2ban
+    fail2ban_bantime: 3600
+    fail2ban_maxretry: 3

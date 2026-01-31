@@ -1,0 +1,78 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+# 📦 Oracle Database Inventory
+# ═══════════════════════════════════════════════════════════════════════════════
+# 🎯 هدف: تعریف سرورهای Oracle Database 19c/21c
+# ═══════════════════════════════════════════════════════════════════════════════
+
+all:
+  vars:
+    ansible_user: root
+    ansible_ssh_private_key_file: ~/.ssh/id_rsa
+    
+    # ═══ Oracle Version ═══
+    oracle_version: "19c"
+    oracle_edition: "EE"  # EE (Enterprise) یا SE2 (Standard)
+    
+    # ═══ Installation Paths ═══
+    oracle_base: "/u01/app/oracle"
+    oracle_home: "/u01/app/oracle/product/19.3.0/dbhome_1"
+    oracle_inventory: "/u01/app/oraInventory"
+    
+    # ═══ Database Settings ═══
+    oracle_sid: "ORCL"
+    oracle_pdb_name: "ORCLPDB1"
+    oracle_charset: "AL32UTF8"
+    oracle_ncharset: "AL16UTF16"
+    
+    # ═══ Memory Settings ═══
+    oracle_memory_target: 4096  # MB
+    oracle_sga_target: 3072     # MB
+    oracle_pga_target: 1024     # MB
+    
+    # ═══ Storage ═══
+    oracle_data_path: "/u02/oradata"
+    oracle_fra_path: "/u03/fra"
+    oracle_fra_size: "20G"
+    
+    # ═══ Users ═══
+    oracle_user: "oracle"
+    oracle_group: "oinstall"
+    oracle_dba_group: "dba"
+    oracle_oper_group: "oper"
+    
+    # ═══ Network ═══
+    oracle_listener_port: 1521
+    oracle_em_port: 5500
+    
+    # ═══ Passwords ═══
+    oracle_sys_password: "CHANGE_ME_SYS_PASSWORD"
+    oracle_system_password: "CHANGE_ME_SYSTEM_PASSWORD"
+    oracle_pdbadmin_password: "CHANGE_ME_PDBADMIN_PASSWORD"
+
+  children:
+    #---------------------------------------
+    # سرورهای Oracle Database
+    #---------------------------------------
+    oracle_db:
+      hosts:
+        oracle-primary:
+          ansible_host: 192.168.1.100
+          oracle_role: "primary"
+          
+        oracle-standby:
+          ansible_host: 192.168.1.101
+          oracle_role: "standby"  # برای Data Guard
+
+    #---------------------------------------
+    # سرور Primary
+    #---------------------------------------
+    oracle_primary:
+      hosts:
+        oracle-primary:
+
+    #---------------------------------------
+    # سرور Standby (Data Guard)
+    #---------------------------------------
+    oracle_standby:
+      hosts:
+        oracle-standby:

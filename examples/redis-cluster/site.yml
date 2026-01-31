@@ -1,0 +1,239 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+# 📦 Redis Cluster Deployment
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# 🎯 هدف:
+#    راه‌اندازی Redis Cluster با:
+#    - 3 Master Node برای sharding
+#    - 3 Replica Node برای High Availability
+#    - Automatic Failover
+#
+# ✅ ویژگی‌های این Setup:
+#    - Data Sharding خودکار
+#    - Automatic Failover
+#    - Read از Replicas
+#    - Persistence با AOF و RDB
+#
+# ✅ کارهایی که انجام می‌شود:
+#    1. نصب Redis از Repository رسمی
+#    2. کانفیگ هر گره برای Cluster Mode
+#    3. راه‌اندازی Cluster
+#    4. تنظیم Slot Distribution
+#    5. اتصال Replicas به Masters
+#
+# 📋 نحوه اجرا:
+#    ansible-playbook -i inventory.yml site.yml
+#    ansible-playbook -i inventory.yml site.yml --tags install
+#    ansible-playbook -i inventory.yml site.yml --tags cluster
+#
+# 📊 Tags موجود:
+#    - install: نصب Redis
+#    - config: کانفیگ Redis
+#    - cluster: ساخت Cluster
+#
+# ═══════════════════════════════════════════════════════════════════════════════
+
+---
+# ═══════════════════════════════════════════════════════════════════════════════
+# نصب Redis روی همه گره‌ها
+# ═══════════════════════════════════════════════════════════════════════════════
+- name: نصب و کانفیگ Redis
+  hosts: redis_cluster
+  become: yes
+  tags: [install, config]
+  
+  tasks:
+    #---------------------------------------------------------------------------
+    # نصب پیش‌نیازها
+    #---------------------------------------------------------------------------
+    - name: نصب پیش‌نیازها (Debian)
+      apt:
+        name:
+          - curl
+          - gnupg
+          - lsb-release
+        state: present
+        update_cache: yes
+      when: ansible_os_family == 'Debian'
+
+    #---------------------------------------------------------------------------
+    # اضافه کردن Redis Repository
+    #---------------------------------------------------------------------------
+    - name: اضافه کردن Redis GPG key (Debian)
+      apt_key:
+        url: https://packages.redis.io/gpg
+        state: present
+      when: ansible_os_family == 'Debian'
+
+    - name: اضافه کردن Redis repository (Debian)
+      apt_repository:
+        repo: "deb https://packages.redis.io/deb {{ ansible_distribution_release }} main"
+        state: present
+        filename: redis
+      when: ansible_os_family == 'Debian'
+
+    - name: اضافه کردن Redis repository (RedHat)
+      yum_repository:
+        name: redis
+        description: Redis Repository
+        baseurl: https://packages.redis.io/rpm/
+        gpgcheck: yes
+        gpgkey: https://packages.redis.io/gpg
+        enabled: yes
+      when: ansible_os_family == 'RedHat'
+
+    #---------------------------------------------------------------------------
+    # نصب Redis
+    #---------------------------------------------------------------------------
+    - name: نصب Redis
+      package:
+        name: redis
+        state: present
+
+    #---------------------------------------------------------------------------
+    # تنظیمات سیستم
+    #---------------------------------------------------------------------------
+    - name: تنظیم vm.overcommit_memory
+      sysctl:
+        name: vm.overcommit_memory
+        value: '1'
+        state: present
+        reload: yes
+
+    - name: غیرفعال کردن THP
+      shell: |
+        echo never > /sys/kernel/mm/transparent_hugepage/enabled
+        echo never > /sys/kernel/mm/transparent_hugepage/defrag
+      changed_when: false
+
+    - name: ساخت دایرکتوری‌ها
+      file:
+        path: "{{ item }}"
+        state: directory
+        owner: redis
+        group: redis
+        mode: '0755'
+      loop:
+        - "{{ redis_data_dir }}"
+        - "{{ redis_log_dir }}"
+        - "{{ redis_config_dir }}"
+
+    #---------------------------------------------------------------------------
+    # کانفیگ Redis
+    #---------------------------------------------------------------------------
+    - name: کانفیگ Redis
+      template:
+        src: templates/redis.conf.j2
+        dest: "{{ redis_config_dir }}/redis.conf"
+        owner: redis
+        group: redis
+        mode: '0640'
+      notify: restart redis
+
+    #---------------------------------------------------------------------------
+    # سرویس Redis
+    #---------------------------------------------------------------------------
+    - name: فعال‌سازی و استارت Redis
+      systemd:
+        name: redis-server
+        enabled: yes
+        state: started
+        daemon_reload: yes
+
+    - name: انتظار برای آماده شدن Redis
+      wait_for:
+        host: "{{ ansible_host }}"
+        port: "{{ redis_port }}"
+        delay: 2
+        timeout: 30
+
+  handlers:
+    - name: restart redis
+      systemd:
+        name: redis-server
+        state: restarted
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ساخت Redis Cluster
+# ═══════════════════════════════════════════════════════════════════════════════
+- name: ساخت Redis Cluster
+  hosts: redis_masters[0]
+  become: yes
+  tags: [cluster]
+  
+  tasks:
+    #---------------------------------------------------------------------------
+    # ساخت Cluster
+    #---------------------------------------------------------------------------
+    - name: بررسی وضعیت Cluster
+      shell: |
+        redis-cli -a {{ redis_password }} cluster info 2>/dev/null | grep cluster_state
+      register: cluster_status
+      changed_when: false
+      failed_when: false
+
+    - name: ساخت Redis Cluster
+      shell: |
+        redis-cli --cluster create \
+        {% for host in groups['redis_masters'] %}
+        {{ hostvars[host]['ansible_host'] }}:{{ redis_port }} \
+        {% endfor %}
+        {% for host in groups['redis_replicas'] %}
+        {{ hostvars[host]['ansible_host'] }}:{{ redis_port }} \
+        {% endfor %}
+        --cluster-replicas {{ redis_cluster_replicas }} \
+        -a {{ redis_password }} \
+        --cluster-yes
+      when: "'cluster_state:ok' not in cluster_status.stdout"
+      register: cluster_create
+
+    #---------------------------------------------------------------------------
+    # بررسی وضعیت Cluster
+    #---------------------------------------------------------------------------
+    - name: نمایش وضعیت Cluster
+      shell: |
+        redis-cli -a {{ redis_password }} cluster nodes
+      register: cluster_nodes
+      changed_when: false
+
+    - name: نمایش Cluster Nodes
+      debug:
+        var: cluster_nodes.stdout_lines
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# نمایش اطلاعات نهایی
+# ═══════════════════════════════════════════════════════════════════════════════
+- name: نمایش اطلاعات نهایی
+  hosts: redis_masters[0]
+  become: no
+  gather_facts: no
+  tags: [always]
+  
+  tasks:
+    - name: نمایش اطلاعات دسترسی
+      debug:
+        msg: |
+          ═══════════════════════════════════════════════════════════════════
+          ✅ Redis Cluster با موفقیت راه‌اندازی شد!
+          ═══════════════════════════════════════════════════════════════════
+          
+          📊 Master Nodes:
+          {% for host in groups['redis_masters'] %}
+             - {{ hostvars[host]['ansible_host'] }}:{{ redis_port }}
+          {% endfor %}
+          
+          📋 Replica Nodes:
+          {% for host in groups['redis_replicas'] %}
+             - {{ hostvars[host]['ansible_host'] }}:{{ redis_port }}
+          {% endfor %}
+          
+          🔐 Password: {{ redis_password }}
+          
+          📝 دستورات مفید:
+             - اتصال: redis-cli -c -h HOST -p {{ redis_port }} -a PASSWORD
+             - وضعیت: redis-cli -a PASSWORD cluster info
+             - گره‌ها: redis-cli -a PASSWORD cluster nodes
+          
+          ═══════════════════════════════════════════════════════════════════

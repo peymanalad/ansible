@@ -1,0 +1,463 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+# 📦 ELK Stack (Elasticsearch + Logstash + Kibana) Deployment
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# 🎯 هدف:
+#    راه‌اندازی کامل ELK Stack شامل:
+#    - Elasticsearch Cluster با 3 گره (High Availability)
+#    - Logstash برای پردازش لاگ‌ها
+#    - Kibana برای Visualization
+#    - Filebeat برای جمع‌آوری لاگ‌ها (روی سرورهای دیگر)
+#
+# ✅ کارهایی که انجام می‌شود:
+#    1. نصب پیش‌نیازها و Java
+#    2. اضافه کردن Elastic Repository
+#    3. نصب و کانفیگ Elasticsearch Cluster
+#    4. تنظیم SSL/TLS برای امنیت
+#    5. نصب و کانفیگ Logstash با پایپلاین‌های مختلف
+#    6. نصب و کانفیگ Kibana
+#    7. تنظیم Index Lifecycle Management (ILM)
+#    8. ایجاد کاربران و نقش‌های امنیتی
+#
+# 📋 نحوه اجرا:
+#    ansible-playbook -i inventory.yml site.yml
+#    ansible-playbook -i inventory.yml site.yml --tags elasticsearch
+#    ansible-playbook -i inventory.yml site.yml --tags logstash
+#    ansible-playbook -i inventory.yml site.yml --tags kibana
+#
+# 📊 Tags موجود:
+#    - common: نصب پیش‌نیازها
+#    - elasticsearch: نصب و کانفیگ Elasticsearch
+#    - logstash: نصب و کانفیگ Logstash
+#    - kibana: نصب و کانفیگ Kibana
+#    - security: تنظیمات امنیتی
+#    - ilm: Index Lifecycle Management
+#
+# ═══════════════════════════════════════════════════════════════════════════════
+
+---
+- name: نصب پیش‌نیازهای مشترک
+  hosts: elk
+  become: yes
+  tags: [common]
+  
+  tasks:
+    #---------------------------------------------------------------------------
+    # بررسی سیستم‌عامل
+    #---------------------------------------------------------------------------
+    - name: بررسی نسخه سیستم‌عامل
+      assert:
+        that:
+          - ansible_os_family in ['Debian', 'RedHat']
+        fail_msg: "این Playbook فقط از Debian/Ubuntu و RHEL/CentOS پشتیبانی می‌کند"
+
+    #---------------------------------------------------------------------------
+    # تنظیمات سیستم
+    #---------------------------------------------------------------------------
+    - name: تنظیم vm.max_map_count برای Elasticsearch
+      sysctl:
+        name: vm.max_map_count
+        value: '262144'
+        state: present
+        reload: yes
+
+    - name: تنظیم file descriptors
+      sysctl:
+        name: fs.file-max
+        value: '65536'
+        state: present
+        reload: yes
+
+    - name: تنظیم ulimits
+      pam_limits:
+        domain: elasticsearch
+        limit_type: "{{ item.type }}"
+        limit_item: "{{ item.item }}"
+        value: "{{ item.value }}"
+      loop:
+        - { type: soft, item: nofile, value: 65536 }
+        - { type: hard, item: nofile, value: 65536 }
+        - { type: soft, item: memlock, value: unlimited }
+        - { type: hard, item: memlock, value: unlimited }
+
+    #---------------------------------------------------------------------------
+    # نصب پیش‌نیازها
+    #---------------------------------------------------------------------------
+    - name: نصب پیش‌نیازها (Debian)
+      apt:
+        name:
+          - apt-transport-https
+          - gnupg2
+          - curl
+          - ca-certificates
+        state: present
+        update_cache: yes
+      when: ansible_os_family == 'Debian'
+
+    - name: نصب پیش‌نیازها (RedHat)
+      yum:
+        name:
+          - curl
+          - ca-certificates
+        state: present
+      when: ansible_os_family == 'RedHat'
+
+    #---------------------------------------------------------------------------
+    # اضافه کردن Elastic Repository
+    #---------------------------------------------------------------------------
+    - name: اضافه کردن Elasticsearch GPG key (Debian)
+      apt_key:
+        url: https://artifacts.elastic.co/GPG-KEY-elasticsearch
+        state: present
+      when: ansible_os_family == 'Debian'
+
+    - name: اضافه کردن Elasticsearch repository (Debian)
+      apt_repository:
+        repo: "deb https://artifacts.elastic.co/packages/8.x/apt stable main"
+        state: present
+        filename: elastic-8.x
+      when: ansible_os_family == 'Debian'
+
+    - name: اضافه کردن Elasticsearch repository (RedHat)
+      copy:
+        dest: /etc/yum.repos.d/elasticsearch.repo
+        content: |
+          [elasticsearch]
+          name=Elasticsearch repository for 8.x packages
+          baseurl=https://artifacts.elastic.co/packages/8.x/yum
+          gpgcheck=1
+          gpgkey=https://artifacts.elastic.co/GPG-KEY-elasticsearch
+          enabled=1
+          autorefresh=1
+          type=rpm-md
+      when: ansible_os_family == 'RedHat'
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# نصب و کانفیگ Elasticsearch
+# ═══════════════════════════════════════════════════════════════════════════════
+- name: نصب و پیکربندی Elasticsearch
+  hosts: elasticsearch
+  become: yes
+  tags: [elasticsearch]
+  
+  tasks:
+    #---------------------------------------------------------------------------
+    # نصب Elasticsearch
+    #---------------------------------------------------------------------------
+    - name: نصب Elasticsearch
+      package:
+        name: "elasticsearch={{ elk_version }}"
+        state: present
+
+    #---------------------------------------------------------------------------
+    # ساخت دایرکتوری‌ها
+    #---------------------------------------------------------------------------
+    - name: ساخت دایرکتوری data
+      file:
+        path: "{{ es_data_path }}"
+        state: directory
+        owner: elasticsearch
+        group: elasticsearch
+        mode: '0755'
+
+    - name: ساخت دایرکتوری certificates
+      file:
+        path: "{{ ssl_certificate_path }}"
+        state: directory
+        owner: elasticsearch
+        group: elasticsearch
+        mode: '0700'
+      when: ssl_enabled
+
+    #---------------------------------------------------------------------------
+    # کانفیگ Elasticsearch
+    #---------------------------------------------------------------------------
+    - name: کانفیگ elasticsearch.yml
+      template:
+        src: templates/elasticsearch.yml.j2
+        dest: /etc/elasticsearch/elasticsearch.yml
+        owner: root
+        group: elasticsearch
+        mode: '0660'
+      notify: restart elasticsearch
+
+    - name: تنظیم JVM options
+      template:
+        src: templates/jvm.options.j2
+        dest: /etc/elasticsearch/jvm.options.d/heap.options
+        owner: root
+        group: elasticsearch
+        mode: '0660'
+      notify: restart elasticsearch
+
+    #---------------------------------------------------------------------------
+    # سرویس Elasticsearch
+    #---------------------------------------------------------------------------
+    - name: فعال‌سازی و استارت Elasticsearch
+      systemd:
+        name: elasticsearch
+        enabled: yes
+        state: started
+        daemon_reload: yes
+
+    - name: انتظار برای آماده شدن Elasticsearch
+      wait_for:
+        host: "{{ ansible_host }}"
+        port: 9200
+        delay: 10
+        timeout: 120
+
+  handlers:
+    - name: restart elasticsearch
+      systemd:
+        name: elasticsearch
+        state: restarted
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# نصب و کانفیگ Logstash
+# ═══════════════════════════════════════════════════════════════════════════════
+- name: نصب و پیکربندی Logstash
+  hosts: logstash
+  become: yes
+  tags: [logstash]
+  
+  tasks:
+    #---------------------------------------------------------------------------
+    # نصب Logstash
+    #---------------------------------------------------------------------------
+    - name: نصب Logstash
+      package:
+        name: "logstash-1:{{ elk_version }}-1"
+        state: present
+
+    #---------------------------------------------------------------------------
+    # کانفیگ Logstash
+    #---------------------------------------------------------------------------
+    - name: کانفیگ logstash.yml
+      template:
+        src: templates/logstash.yml.j2
+        dest: /etc/logstash/logstash.yml
+        owner: root
+        group: logstash
+        mode: '0640'
+      notify: restart logstash
+
+    - name: تنظیم JVM heap برای Logstash
+      lineinfile:
+        path: /etc/logstash/jvm.options
+        regexp: "{{ item.regexp }}"
+        line: "{{ item.line }}"
+      loop:
+        - { regexp: '^-Xms', line: "-Xms{{ logstash_heap_size }}" }
+        - { regexp: '^-Xmx', line: "-Xmx{{ logstash_heap_size }}" }
+      notify: restart logstash
+
+    #---------------------------------------------------------------------------
+    # Pipeline‌های Logstash
+    #---------------------------------------------------------------------------
+    - name: ساخت دایرکتوری pipeline
+      file:
+        path: /etc/logstash/conf.d
+        state: directory
+        owner: root
+        group: logstash
+        mode: '0755'
+
+    - name: کپی pipeline برای Syslog
+      template:
+        src: templates/pipeline-syslog.conf.j2
+        dest: /etc/logstash/conf.d/01-syslog.conf
+        owner: root
+        group: logstash
+        mode: '0640'
+      notify: restart logstash
+
+    - name: کپی pipeline برای Nginx
+      template:
+        src: templates/pipeline-nginx.conf.j2
+        dest: /etc/logstash/conf.d/02-nginx.conf
+        owner: root
+        group: logstash
+        mode: '0640'
+      notify: restart logstash
+
+    - name: کپی pipeline برای Beats
+      template:
+        src: templates/pipeline-beats.conf.j2
+        dest: /etc/logstash/conf.d/10-beats.conf
+        owner: root
+        group: logstash
+        mode: '0640'
+      notify: restart logstash
+
+    #---------------------------------------------------------------------------
+    # سرویس Logstash
+    #---------------------------------------------------------------------------
+    - name: فعال‌سازی و استارت Logstash
+      systemd:
+        name: logstash
+        enabled: yes
+        state: started
+        daemon_reload: yes
+
+  handlers:
+    - name: restart logstash
+      systemd:
+        name: logstash
+        state: restarted
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# نصب و کانفیگ Kibana
+# ═══════════════════════════════════════════════════════════════════════════════
+- name: نصب و پیکربندی Kibana
+  hosts: kibana
+  become: yes
+  tags: [kibana]
+  
+  tasks:
+    #---------------------------------------------------------------------------
+    # نصب Kibana
+    #---------------------------------------------------------------------------
+    - name: نصب Kibana
+      package:
+        name: "kibana={{ elk_version }}"
+        state: present
+
+    #---------------------------------------------------------------------------
+    # کانفیگ Kibana
+    #---------------------------------------------------------------------------
+    - name: کانفیگ kibana.yml
+      template:
+        src: templates/kibana.yml.j2
+        dest: /etc/kibana/kibana.yml
+        owner: root
+        group: kibana
+        mode: '0660'
+      notify: restart kibana
+
+    #---------------------------------------------------------------------------
+    # سرویس Kibana
+    #---------------------------------------------------------------------------
+    - name: فعال‌سازی و استارت Kibana
+      systemd:
+        name: kibana
+        enabled: yes
+        state: started
+        daemon_reload: yes
+
+    - name: انتظار برای آماده شدن Kibana
+      wait_for:
+        host: "{{ ansible_host }}"
+        port: "{{ kibana_port }}"
+        delay: 10
+        timeout: 120
+
+  handlers:
+    - name: restart kibana
+      systemd:
+        name: kibana
+        state: restarted
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# تنظیمات پس از نصب
+# ═══════════════════════════════════════════════════════════════════════════════
+- name: تنظیمات پس از نصب ELK
+  hosts: elasticsearch[0]
+  become: yes
+  tags: [ilm, security]
+  
+  tasks:
+    #---------------------------------------------------------------------------
+    # ایجاد ILM Policy
+    #---------------------------------------------------------------------------
+    - name: ایجاد ILM Policy برای لاگ‌ها
+      uri:
+        url: "https://{{ ansible_host }}:9200/_ilm/policy/logs-policy"
+        method: PUT
+        body_format: json
+        body:
+          policy:
+            phases:
+              hot:
+                actions:
+                  rollover:
+                    max_size: "50GB"
+                    max_age: "7d"
+              warm:
+                min_age: "7d"
+                actions:
+                  shrink:
+                    number_of_shards: 1
+                  forcemerge:
+                    max_num_segments: 1
+              cold:
+                min_age: "30d"
+                actions:
+                  freeze: {}
+              delete:
+                min_age: "{{ log_retention_days }}d"
+                actions:
+                  delete: {}
+        user: elastic
+        password: "{{ es_elastic_password }}"
+        validate_certs: no
+        status_code: [200, 201]
+      tags: [ilm]
+
+    #---------------------------------------------------------------------------
+    # ایجاد Index Template
+    #---------------------------------------------------------------------------
+    - name: ایجاد Index Template برای لاگ‌ها
+      uri:
+        url: "https://{{ ansible_host }}:9200/_index_template/logs-template"
+        method: PUT
+        body_format: json
+        body:
+          index_patterns: ["logs-*"]
+          template:
+            settings:
+              number_of_shards: 1
+              number_of_replicas: 1
+              index.lifecycle.name: "logs-policy"
+              index.lifecycle.rollover_alias: "logs"
+            mappings:
+              properties:
+                "@timestamp":
+                  type: date
+                message:
+                  type: text
+                host:
+                  type: keyword
+                level:
+                  type: keyword
+        user: elastic
+        password: "{{ es_elastic_password }}"
+        validate_certs: no
+        status_code: [200, 201]
+      tags: [ilm]
+
+    #---------------------------------------------------------------------------
+    # نمایش اطلاعات نهایی
+    #---------------------------------------------------------------------------
+    - name: نمایش اطلاعات دسترسی
+      debug:
+        msg: |
+          ═══════════════════════════════════════════════════════════════════
+          ✅ ELK Stack با موفقیت نصب شد!
+          ═══════════════════════════════════════════════════════════════════
+          
+          📊 Kibana URL: https://{{ hostvars[groups['kibana'][0]]['ansible_host'] }}:{{ kibana_port }}
+          
+          🔐 کاربر: elastic
+          🔑 رمز عبور: {{ es_elastic_password }}
+          
+          📝 پورت‌های Logstash:
+             - Beats: 5044
+             - Syslog: 5514
+             - HTTP: 8080
+          
+          ═══════════════════════════════════════════════════════════════════

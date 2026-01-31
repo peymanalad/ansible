@@ -1,0 +1,30 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+# Oracle Database Systemd Service
+# ═══════════════════════════════════════════════════════════════════════════════
+
+[Unit]
+Description=Oracle Database Service
+After=network.target
+
+[Service]
+Type=forking
+User=oracle
+Group=oinstall
+Environment="ORACLE_BASE={{ oracle_base }}"
+Environment="ORACLE_HOME={{ oracle_home }}"
+Environment="ORACLE_SID={{ oracle_sid }}"
+Environment="PATH={{ oracle_home }}/bin:/usr/local/bin:/usr/bin:/bin"
+Environment="LD_LIBRARY_PATH={{ oracle_home }}/lib"
+
+ExecStart=/home/oracle/scripts/start_oracle.sh
+ExecStop=/home/oracle/scripts/stop_oracle.sh
+
+LimitNOFILE=65536
+LimitNPROC=16384
+LimitMEMLOCK=134217728
+
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

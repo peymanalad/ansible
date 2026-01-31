@@ -1,0 +1,77 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+# Logstash Pipeline: Syslog Input
+# ═══════════════════════════════════════════════════════════════════════════════
+# دریافت لاگ‌های Syslog از شبکه
+
+input {
+  # Syslog over UDP
+  syslog {
+    port => 5514
+    type => "syslog"
+    tags => ["syslog", "system"]
+  }
+  
+  # Syslog over TCP
+  tcp {
+    port => 5515
+    type => "syslog"
+    tags => ["syslog", "system", "tcp"]
+  }
+}
+
+filter {
+  if [type] == "syslog" {
+    # Parse syslog message
+    grok {
+      match => { 
+        "message" => "%{SYSLOGTIMESTAMP:syslog_timestamp} %{SYSLOGHOST:syslog_hostname} %{DATA:syslog_program}(?:\[%{POSINT:syslog_pid}\])?: %{GREEDYDATA:syslog_message}"
+      }
+      add_field => [ "received_at", "%{@timestamp}" ]
+    }
+    
+    # Parse timestamp
+    date {
+      match => [ "syslog_timestamp", "MMM  d HH:mm:ss", "MMM dd HH:mm:ss" ]
+      timezone => "Asia/Tehran"
+    }
+    
+    # Extract severity
+    if [priority] {
+      ruby {
+        code => "
+          priority = event.get('priority').to_i
+          event.set('severity', priority & 7)
+          event.set('facility', priority >> 3)
+        "
+      }
+    }
+    
+    # Add severity label
+    if [severity] == 0 { mutate { add_field => { "severity_label" => "emergency" } } }
+    else if [severity] == 1 { mutate { add_field => { "severity_label" => "alert" } } }
+    else if [severity] == 2 { mutate { add_field => { "severity_label" => "critical" } } }
+    else if [severity] == 3 { mutate { add_field => { "severity_label" => "error" } } }
+    else if [severity] == 4 { mutate { add_field => { "severity_label" => "warning" } } }
+    else if [severity] == 5 { mutate { add_field => { "severity_label" => "notice" } } }
+    else if [severity] == 6 { mutate { add_field => { "severity_label" => "info" } } }
+    else if [severity] == 7 { mutate { add_field => { "severity_label" => "debug" } } }
+    
+    # Remove unnecessary fields
+    mutate {
+      remove_field => [ "host", "priority" ]
+    }
+  }
+}
+
+output {
+  if [type] == "syslog" {
+    elasticsearch {
+      hosts => [{% for host in groups['elasticsearch'] %}"https://{{ hostvars[host]['ansible_host'] }}:9200"{% if not loop.last %}, {% endif %}{% endfor %}]
+      user => "elastic"
+      password => "{{ es_elastic_password }}"
+      ssl_certificate_verification => false
+      index => "syslog-%{+YYYY.MM.dd}"
+      action => "create"
+    }
+  }
+}

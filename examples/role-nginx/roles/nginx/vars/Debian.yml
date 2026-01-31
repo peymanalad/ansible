@@ -1,0 +1,3 @@
+---
+# Debian/Ubuntu specific variables
+nginx_package_name: nginx

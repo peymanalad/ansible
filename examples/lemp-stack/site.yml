@@ -1,0 +1,276 @@
+---
+# LEMP Stack - Site Playbook
+
+- name: Apply common configuration to all servers
+  hosts: all
+  become: yes
+  
+  vars:
+    timezone: Asia/Tehran
+    ntp_servers:
+      - time.google.com
+      - time.cloudflare.com
+  
+  tasks:
+    - name: Update apt cache
+      apt:
+        update_cache: yes
+        cache_valid_time: 3600
+    
+    - name: Install common packages
+      apt:
+        name:
+          - vim
+          - htop
+          - curl
+          - wget
+          - git
+          - unzip
+          - ufw
+          - fail2ban
+        state: present
+    
+    - name: Set timezone
+      timezone:
+        name: "{{ timezone }}"
+    
+    - name: Configure UFW defaults
+      ufw:
+        direction: "{{ item.direction }}"
+        policy: "{{ item.policy }}"
+      loop:
+        - { direction: 'incoming', policy: 'deny' }
+        - { direction: 'outgoing', policy: 'allow' }
+    
+    - name: Allow SSH
+      ufw:
+        rule: allow
+        port: '22'
+        proto: tcp
+    
+    - name: Enable UFW
+      ufw:
+        state: enabled
+
+
+- name: Configure database servers
+  hosts: dbservers
+  become: yes
+  
+  vars:
+    mysql_root_password: "{{ vault_mysql_root_password | default('ChangeMe123!') }}"
+    mysql_databases:
+      - name: webapp
+        encoding: utf8mb4
+        collation: utf8mb4_unicode_ci
+    mysql_users:
+      - name: webapp
+        host: '%'
+        password: "{{ vault_mysql_webapp_password | default('WebApp123!') }}"
+        priv: 'webapp.*:ALL'
+  
+  tasks:
+    - name: Install MySQL server
+      apt:
+        name:
+          - mysql-server
+          - mysql-client
+          - python3-pymysql
+        state: present
+    
+    - name: Start MySQL service
+      service:
+        name: mysql
+        state: started
+        enabled: yes
+    
+    - name: Set MySQL root password
+      mysql_user:
+        name: root
+        password: "{{ mysql_root_password }}"
+        host: localhost
+        login_unix_socket: /var/run/mysqld/mysqld.sock
+        state: present
+      no_log: true
+    
+    - name: Create .my.cnf for root
+      template:
+        src: templates/my.cnf.j2
+        dest: /root/.my.cnf
+        owner: root
+        group: root
+        mode: '0600'
+    
+    - name: Remove anonymous users
+      mysql_user:
+        name: ''
+        host_all: yes
+        state: absent
+        login_user: root
+        login_password: "{{ mysql_root_password }}"
+    
+    - name: Create databases
+      mysql_db:
+        name: "{{ item.name }}"
+        encoding: "{{ item.encoding }}"
+        collation: "{{ item.collation }}"
+        state: present
+        login_user: root
+        login_password: "{{ mysql_root_password }}"
+      loop: "{{ mysql_databases }}"
+    
+    - name: Create database users
+      mysql_user:
+        name: "{{ item.name }}"
+        host: "{{ item.host }}"
+        password: "{{ item.password }}"
+        priv: "{{ item.priv }}"
+        state: present
+        login_user: root
+        login_password: "{{ mysql_root_password }}"
+      loop: "{{ mysql_users }}"
+      no_log: true
+    
+    - name: Configure MySQL to listen on all interfaces
+      lineinfile:
+        path: /etc/mysql/mysql.conf.d/mysqld.cnf
+        regexp: '^bind-address'
+        line: 'bind-address = 0.0.0.0'
+      notify: Restart MySQL
+    
+    - name: Allow MySQL port in firewall
+      ufw:
+        rule: allow
+        port: '3306'
+        proto: tcp
+  
+  handlers:
+    - name: Restart MySQL
+      service:
+        name: mysql
+        state: restarted
+
+
+- name: Configure web servers
+  hosts: webservers
+  become: yes
+  
+  vars:
+    nginx_worker_processes: auto
+    nginx_worker_connections: 1024
+    php_version: "8.1"
+    php_packages:
+      - "php{{ php_version }}-fpm"
+      - "php{{ php_version }}-mysql"
+      - "php{{ php_version }}-curl"
+      - "php{{ php_version }}-gd"
+      - "php{{ php_version }}-mbstring"
+      - "php{{ php_version }}-xml"
+      - "php{{ php_version }}-zip"
+      - "php{{ php_version }}-bcmath"
+      - "php{{ php_version }}-intl"
+    document_root: /var/www/html
+    db_host: "{{ hostvars[groups['dbservers'][0]]['ansible_host'] }}"
+  
+  tasks:
+    - name: Install Nginx
+      apt:
+        name: nginx
+        state: present
+    
+    - name: Install PHP and extensions
+      apt:
+        name: "{{ php_packages }}"
+        state: present
+    
+    - name: Create document root
+      file:
+        path: "{{ document_root }}"
+        state: directory
+        owner: www-data
+        group: www-data
+        mode: '0755'
+    
+    - name: Copy Nginx configuration
+      template:
+        src: templates/nginx.conf.j2
+        dest: /etc/nginx/nginx.conf
+        owner: root
+        group: root
+        mode: '0644'
+      notify: Reload Nginx
+    
+    - name: Copy site configuration
+      template:
+        src: templates/default-site.conf.j2
+        dest: /etc/nginx/sites-available/default
+        owner: root
+        group: root
+        mode: '0644'
+      notify: Reload Nginx
+    
+    - name: Enable default site
+      file:
+        src: /etc/nginx/sites-available/default
+        dest: /etc/nginx/sites-enabled/default
+        state: link
+      notify: Reload Nginx
+    
+    - name: Configure PHP-FPM
+      template:
+        src: templates/php-fpm-pool.conf.j2
+        dest: "/etc/php/{{ php_version }}/fpm/pool.d/www.conf"
+      notify: Restart PHP-FPM
+    
+    - name: Create PHP info page
+      copy:
+        content: |
+          <?php
+          phpinfo();
+        dest: "{{ document_root }}/info.php"
+        owner: www-data
+        group: www-data
+        mode: '0644'
+    
+    - name: Create database test page
+      template:
+        src: templates/db-test.php.j2
+        dest: "{{ document_root }}/db-test.php"
+        owner: www-data
+        group: www-data
+        mode: '0644'
+    
+    - name: Start and enable Nginx
+      service:
+        name: nginx
+        state: started
+        enabled: yes
+    
+    - name: Start and enable PHP-FPM
+      service:
+        name: "php{{ php_version }}-fpm"
+        state: started
+        enabled: yes
+    
+    - name: Allow HTTP in firewall
+      ufw:
+        rule: allow
+        port: '80'
+        proto: tcp
+    
+    - name: Allow HTTPS in firewall
+      ufw:
+        rule: allow
+        port: '443'
+        proto: tcp
+  
+  handlers:
+    - name: Reload Nginx
+      service:
+        name: nginx
+        state: reloaded
+    
+    - name: Restart PHP-FPM
+      service:
+        name: "php{{ php_version }}-fpm"
+        state: restarted

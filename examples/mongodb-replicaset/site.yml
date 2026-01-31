@@ -1,0 +1,310 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+# 📦 MongoDB Replica Set Deployment
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# 🎯 هدف:
+#    راه‌اندازی MongoDB Replica Set با 3 گره برای High Availability
+#
+# ✅ ویژگی‌های این Setup:
+#    - Automatic Failover
+#    - Data Redundancy
+#    - Read Scaling از Secondary ها
+#    - Authentication فعال
+#
+# ✅ کارهایی که انجام می‌شود:
+#    1. نصب MongoDB از Repository رسمی
+#    2. کانفیگ هر گره برای Replica Set
+#    3. Initialize کردن Replica Set
+#    4. ساخت کاربران Admin و Application
+#    5. تنظیم Authentication
+#
+# 📋 نحوه اجرا:
+#    ansible-playbook -i inventory.yml site.yml
+#    ansible-playbook -i inventory.yml site.yml --tags install
+#    ansible-playbook -i inventory.yml site.yml --tags replicaset
+#
+# 📊 Tags موجود:
+#    - install: نصب MongoDB
+#    - config: کانفیگ MongoDB
+#    - replicaset: ساخت Replica Set
+#    - security: تنظیمات امنیتی
+#
+# ═══════════════════════════════════════════════════════════════════════════════
+
+---
+# ═══════════════════════════════════════════════════════════════════════════════
+# نصب MongoDB روی همه گره‌ها
+# ═══════════════════════════════════════════════════════════════════════════════
+- name: نصب و کانفیگ MongoDB
+  hosts: mongodb
+  become: yes
+  tags: [install, config]
+  
+  tasks:
+    #---------------------------------------------------------------------------
+    # نصب پیش‌نیازها
+    #---------------------------------------------------------------------------
+    - name: نصب پیش‌نیازها
+      package:
+        name:
+          - gnupg
+          - curl
+          - python3-pip
+        state: present
+
+    - name: نصب pymongo برای Ansible
+      pip:
+        name: pymongo
+        state: present
+
+    #---------------------------------------------------------------------------
+    # اضافه کردن MongoDB Repository
+    #---------------------------------------------------------------------------
+    - name: اضافه کردن MongoDB GPG key (Debian)
+      apt_key:
+        url: "https://pgp.mongodb.com/server-{{ mongodb_version }}.asc"
+        state: present
+      when: ansible_os_family == 'Debian'
+
+    - name: اضافه کردن MongoDB repository (Debian)
+      apt_repository:
+        repo: "deb [ arch=amd64,arm64 ] https://repo.mongodb.org/apt/ubuntu {{ ansible_distribution_release }}/mongodb-org/{{ mongodb_version }} multiverse"
+        state: present
+        filename: mongodb-org-{{ mongodb_version }}
+      when: ansible_os_family == 'Debian'
+
+    - name: اضافه کردن MongoDB repository (RedHat)
+      yum_repository:
+        name: mongodb-org-{{ mongodb_version }}
+        description: MongoDB Repository
+        baseurl: "https://repo.mongodb.org/yum/redhat/$releasever/mongodb-org/{{ mongodb_version }}/x86_64/"
+        gpgcheck: yes
+        gpgkey: "https://pgp.mongodb.com/server-{{ mongodb_version }}.asc"
+        enabled: yes
+      when: ansible_os_family == 'RedHat'
+
+    #---------------------------------------------------------------------------
+    # نصب MongoDB
+    #---------------------------------------------------------------------------
+    - name: نصب MongoDB
+      package:
+        name: mongodb-org
+        state: present
+        update_cache: yes
+
+    #---------------------------------------------------------------------------
+    # ساخت دایرکتوری‌ها
+    #---------------------------------------------------------------------------
+    - name: ساخت دایرکتوری data
+      file:
+        path: "{{ mongodb_data_path }}"
+        state: directory
+        owner: mongodb
+        group: mongodb
+        mode: '0755'
+
+    - name: ساخت دایرکتوری keyfile
+      file:
+        path: /etc/mongodb
+        state: directory
+        owner: mongodb
+        group: mongodb
+        mode: '0700'
+
+    #---------------------------------------------------------------------------
+    # ساخت Keyfile برای Replica Set Authentication
+    #---------------------------------------------------------------------------
+    - name: ساخت keyfile روی اولین گره
+      shell: openssl rand -base64 756 > /etc/mongodb/keyfile
+      args:
+        creates: /etc/mongodb/keyfile
+      when: inventory_hostname == groups['mongodb'][0]
+
+    - name: خواندن keyfile
+      slurp:
+        src: /etc/mongodb/keyfile
+      register: mongodb_keyfile
+      when: inventory_hostname == groups['mongodb'][0]
+
+    - name: کپی keyfile به گره‌های دیگر
+      copy:
+        content: "{{ hostvars[groups['mongodb'][0]]['mongodb_keyfile']['content'] | b64decode }}"
+        dest: /etc/mongodb/keyfile
+        owner: mongodb
+        group: mongodb
+        mode: '0400'
+
+    #---------------------------------------------------------------------------
+    # کانفیگ MongoDB
+    #---------------------------------------------------------------------------
+    - name: کانفیگ MongoDB
+      template:
+        src: templates/mongod.conf.j2
+        dest: /etc/mongod.conf
+        owner: root
+        group: root
+        mode: '0644'
+      notify: restart mongodb
+
+    #---------------------------------------------------------------------------
+    # سرویس MongoDB
+    #---------------------------------------------------------------------------
+    - name: فعال‌سازی و استارت MongoDB
+      systemd:
+        name: mongod
+        enabled: yes
+        state: started
+        daemon_reload: yes
+
+    - name: انتظار برای آماده شدن MongoDB
+      wait_for:
+        host: "{{ ansible_host }}"
+        port: "{{ mongodb_port }}"
+        delay: 5
+        timeout: 60
+
+  handlers:
+    - name: restart mongodb
+      systemd:
+        name: mongod
+        state: restarted
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Initialize Replica Set
+# ═══════════════════════════════════════════════════════════════════════════════
+- name: Initialize Replica Set
+  hosts: mongodb_primary
+  become: yes
+  tags: [replicaset]
+  
+  tasks:
+    #---------------------------------------------------------------------------
+    # Initialize Replica Set
+    #---------------------------------------------------------------------------
+    - name: بررسی وضعیت Replica Set
+      shell: |
+        mongosh --quiet --eval "rs.status().ok" 2>/dev/null || echo "0"
+      register: rs_status
+      changed_when: false
+
+    - name: Initialize Replica Set
+      shell: |
+        mongosh --quiet --eval '
+          rs.initiate({
+            _id: "{{ mongodb_replicaset_name }}",
+            members: [
+              {% for host in groups["mongodb"] %}
+              {
+                _id: {{ loop.index0 }},
+                host: "{{ hostvars[host]["ansible_host"] }}:{{ mongodb_port }}",
+                priority: {{ hostvars[host]["mongodb_priority"] }},
+                votes: {{ hostvars[host]["mongodb_votes"] }}
+              }{% if not loop.last %},{% endif %}
+              {% endfor %}
+            ]
+          })
+        '
+      when: rs_status.stdout == "0"
+      register: rs_init
+
+    - name: انتظار برای انتخاب Primary
+      shell: |
+        mongosh --quiet --eval "rs.status().members.filter(m => m.stateStr === 'PRIMARY').length"
+      register: primary_count
+      until: primary_count.stdout | int >= 1
+      retries: 30
+      delay: 5
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ساخت کاربران
+# ═══════════════════════════════════════════════════════════════════════════════
+- name: ساخت کاربران MongoDB
+  hosts: mongodb_primary
+  become: yes
+  tags: [security]
+  
+  tasks:
+    #---------------------------------------------------------------------------
+    # ساخت Admin User
+    #---------------------------------------------------------------------------
+    - name: ساخت Admin User
+      shell: |
+        mongosh --quiet --eval '
+          use admin
+          if (db.getUser("{{ mongodb_admin_user }}") === null) {
+            db.createUser({
+              user: "{{ mongodb_admin_user }}",
+              pwd: "{{ mongodb_admin_password }}",
+              roles: [
+                { role: "root", db: "admin" },
+                { role: "userAdminAnyDatabase", db: "admin" },
+                { role: "clusterAdmin", db: "admin" }
+              ]
+            })
+            print("Admin user created")
+          } else {
+            print("Admin user already exists")
+          }
+        '
+      register: admin_user
+      changed_when: "'created' in admin_user.stdout"
+
+    #---------------------------------------------------------------------------
+    # ساخت Application User
+    #---------------------------------------------------------------------------
+    - name: ساخت Application User
+      shell: |
+        mongosh -u {{ mongodb_admin_user }} -p {{ mongodb_admin_password }} --authenticationDatabase admin --quiet --eval '
+          use {{ mongodb_app_database }}
+          if (db.getUser("{{ mongodb_app_user }}") === null) {
+            db.createUser({
+              user: "{{ mongodb_app_user }}",
+              pwd: "{{ mongodb_app_password }}",
+              roles: [
+                { role: "readWrite", db: "{{ mongodb_app_database }}" }
+              ]
+            })
+            print("App user created")
+          } else {
+            print("App user already exists")
+          }
+        '
+      register: app_user
+      changed_when: "'created' in app_user.stdout"
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# نمایش اطلاعات نهایی
+# ═══════════════════════════════════════════════════════════════════════════════
+- name: نمایش اطلاعات نهایی
+  hosts: mongodb_primary
+  become: no
+  gather_facts: no
+  tags: [always]
+  
+  tasks:
+    - name: نمایش اطلاعات دسترسی
+      debug:
+        msg: |
+          ═══════════════════════════════════════════════════════════════════
+          ✅ MongoDB Replica Set با موفقیت راه‌اندازی شد!
+          ═══════════════════════════════════════════════════════════════════
+          
+          📊 Replica Set: {{ mongodb_replicaset_name }}
+          
+          📋 Members:
+          {% for host in groups['mongodb'] %}
+             - {{ hostvars[host]['ansible_host'] }}:{{ mongodb_port }}
+          {% endfor %}
+          
+          🔐 Connection String:
+          mongodb://{{ mongodb_app_user }}:{{ mongodb_app_password }}@{% for host in groups['mongodb'] %}{{ hostvars[host]['ansible_host'] }}:{{ mongodb_port }}{% if not loop.last %},{% endif %}{% endfor %}/{{ mongodb_app_database }}?replicaSet={{ mongodb_replicaset_name }}
+          
+          📝 دستورات مفید:
+             - اتصال: mongosh -u admin -p PASSWORD --authenticationDatabase admin
+             - وضعیت: rs.status()
+             - کانفیگ: rs.conf()
+          
+          ═══════════════════════════════════════════════════════════════════

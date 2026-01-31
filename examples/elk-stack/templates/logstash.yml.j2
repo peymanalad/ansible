@@ -1,0 +1,40 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+# Logstash Configuration
+# ═══════════════════════════════════════════════════════════════════════════════
+
+#---------------------------------------
+# Node Settings
+#---------------------------------------
+node.name: "{{ inventory_hostname }}"
+
+#---------------------------------------
+# Path Settings
+#---------------------------------------
+path.data: /var/lib/logstash
+path.logs: /var/log/logstash
+path.config: /etc/logstash/conf.d
+
+#---------------------------------------
+# Pipeline Settings
+#---------------------------------------
+pipeline.workers: {{ ansible_processor_vcpus | default(2) }}
+pipeline.batch.size: 125
+pipeline.batch.delay: 50
+
+#---------------------------------------
+# Config Reload
+#---------------------------------------
+config.reload.automatic: true
+config.reload.interval: 3s
+
+#---------------------------------------
+# HTTP API
+#---------------------------------------
+api.enabled: true
+api.http.host: 127.0.0.1
+api.http.port: 9600
+
+#---------------------------------------
+# Logging
+#---------------------------------------
+log.level: info

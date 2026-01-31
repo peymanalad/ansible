@@ -1,0 +1,109 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+# 📦 PostgreSQL Installation and Configuration
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# 🎯 هدف این Playbook:
+#    نصب و راه‌اندازی کامل PostgreSQL با تنظیمات Production-ready
+#
+# ✅ کارهایی که انجام می‌شود:
+#    1. نصب PostgreSQL از repository رسمی
+#    2. تنظیم postgresql.conf برای performance
+#    3. تنظیم pg_hba.conf برای authentication
+#    4. ساخت database و user
+#    5. تنظیم backup خودکار
+#    6. فعال‌سازی SSL
+#    7. تنظیم replication (اختیاری)
+#
+# 📋 نحوه اجرا:
+#    ansible-playbook -i inventory.yml site.yml
+#
+# 🏷️ Tags موجود:
+#    - install: فقط نصب
+#    - config: فقط تنظیمات
+#    - databases: ساخت database و user
+#    - backup: تنظیم backup
+#    - replication: تنظیم replication
+#
+# ═══════════════════════════════════════════════════════════════════════════════
+
+---
+all:
+  children:
+    postgres_primary:
+      hosts:
+        pg-primary:
+          ansible_host: 192.168.1.50
+          postgres_role: primary
+    
+    postgres_replica:
+      hosts:
+        pg-replica-1:
+          ansible_host: 192.168.1.51
+          postgres_role: replica
+        pg-replica-2:
+          ansible_host: 192.168.1.52
+          postgres_role: replica
+  
+  vars:
+    # PostgreSQL Version
+    postgres_version: 16
+    
+    # Paths
+    postgres_data_dir: /var/lib/postgresql/{{ postgres_version }}/main
+    postgres_config_dir: /etc/postgresql/{{ postgres_version }}/main
+    postgres_log_dir: /var/log/postgresql
+    
+    # Connection settings
+    postgres_listen_addresses: "*"
+    postgres_port: 5432
+    postgres_max_connections: 200
+    
+    # Memory settings (تنظیم بر اساس RAM سرور)
+    postgres_shared_buffers: "256MB"          # 25% of RAM
+    postgres_effective_cache_size: "768MB"    # 75% of RAM
+    postgres_work_mem: "4MB"
+    postgres_maintenance_work_mem: "64MB"
+    
+    # WAL settings
+    postgres_wal_level: replica
+    postgres_max_wal_senders: 5
+    postgres_wal_keep_size: "1GB"
+    
+    # Databases to create
+    postgres_databases:
+      - name: myapp
+        owner: myapp
+        encoding: UTF8
+        lc_collate: en_US.UTF-8
+        lc_ctype: en_US.UTF-8
+      
+      - name: analytics
+        owner: analytics
+        encoding: UTF8
+    
+    # Users to create
+    postgres_users:
+      - name: myapp
+        password: "{{ vault_myapp_db_password }}"
+        role_attr_flags: CREATEDB,NOSUPERUSER
+      
+      - name: analytics
+        password: "{{ vault_analytics_db_password }}"
+        role_attr_flags: NOSUPERUSER
+      
+      - name: readonly
+        password: "{{ vault_readonly_db_password }}"
+        role_attr_flags: NOSUPERUSER
+    
+    # Backup settings
+    postgres_backup_enabled: true
+    postgres_backup_dir: /var/backups/postgresql
+    postgres_backup_retention_days: 7
+    
+    # Replication settings
+    postgres_replication_enabled: true
+    postgres_replication_user: replicator
+    postgres_replication_password: "{{ vault_replication_password }}"
+    
+    # SSL
+    postgres_ssl_enabled: true

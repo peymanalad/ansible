@@ -1,0 +1,93 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+# 📦 Microsoft SQL Server on Linux - Installation & Configuration
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# 🎯 هدف این Playbook:
+#    نصب و راه‌اندازی SQL Server 2022 روی Ubuntu/RHEL
+#
+# ✅ کارهایی که انجام می‌شود:
+#    1. نصب SQL Server از repository مایکروسافت
+#    2. تنظیم SA password و activation
+#    3. نصب SQL Server Tools (sqlcmd, bcp)
+#    4. ساخت database و user
+#    5. تنظیم firewall
+#    6. تنظیم backup خودکار
+#    7. تنظیمات performance
+#
+# ⚠️ پیش‌نیازها:
+#    - Ubuntu 20.04/22.04 یا RHEL 8/9
+#    - حداقل 2GB RAM (پیشنهادی 4GB+)
+#    - 10GB فضای خالی
+#
+# 📋 نحوه اجرا:
+#    ansible-playbook -i inventory.yml site.yml --ask-vault-pass
+#
+# ═══════════════════════════════════════════════════════════════════════════════
+
+---
+all:
+  hosts:
+    sql-server-1:
+      ansible_host: 192.168.1.60
+  
+  vars:
+    # SQL Server Edition
+    # express, developer, standard, enterprise
+    mssql_edition: developer
+    
+    # SQL Server 2022
+    mssql_version: 2022
+    
+    # SA Password (use vault!)
+    mssql_sa_password: "{{ vault_mssql_sa_password }}"
+    
+    # Product Key (for standard/enterprise)
+    # mssql_product_key: "XXXXX-XXXXX-XXXXX-XXXXX-XXXXX"
+    
+    # Memory settings
+    mssql_memory_limit_mb: 2048
+    
+    # TCP Port
+    mssql_tcp_port: 1433
+    
+    # Collation
+    mssql_collation: SQL_Latin1_General_CP1_CI_AS
+    
+    # Data paths
+    mssql_data_dir: /var/opt/mssql/data
+    mssql_log_dir: /var/opt/mssql/log
+    mssql_backup_dir: /var/opt/mssql/backup
+    
+    # Databases to create
+    mssql_databases:
+      - name: MyAppDB
+        owner: myapp_user
+      - name: ReportingDB
+        owner: reporting_user
+    
+    # Users to create
+    mssql_users:
+      - name: myapp_user
+        password: "{{ vault_myapp_user_password }}"
+        default_db: MyAppDB
+        roles:
+          - db_owner
+      
+      - name: reporting_user
+        password: "{{ vault_reporting_user_password }}"
+        default_db: ReportingDB
+        roles:
+          - db_datareader
+      
+      - name: readonly_user
+        password: "{{ vault_readonly_password }}"
+        default_db: MyAppDB
+        roles:
+          - db_datareader
+    
+    # Backup settings
+    mssql_backup_enabled: true
+    mssql_backup_retention_days: 7
+    
+    # Agent (for scheduled jobs)
+    mssql_agent_enabled: true

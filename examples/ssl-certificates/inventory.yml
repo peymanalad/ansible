@@ -1,0 +1,36 @@
+---
+# SSL Certificate Management with Let's Encrypt
+# مدیریت گواهی SSL با Let's Encrypt
+
+all:
+  children:
+    webservers:
+      hosts:
+        web-1:
+          ansible_host: 192.168.1.10
+          domains:
+            - domain: example.com
+              aliases:
+                - www.example.com
+            - domain: api.example.com
+        web-2:
+          ansible_host: 192.168.1.11
+          domains:
+            - domain: shop.example.com
+              aliases:
+                - www.shop.example.com
+  
+  vars:
+    # Let's Encrypt settings
+    letsencrypt_email: admin@example.com
+    letsencrypt_staging: false  # Use staging for testing
+    
+    # Renewal settings
+    renewal_cron_hour: 3
+    renewal_cron_minute: 30
+    
+    # Webroot settings
+    webroot_path: /var/www/letsencrypt
+    
+    # Auto reload service after renewal
+    reload_service: nginx

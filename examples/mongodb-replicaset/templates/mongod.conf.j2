@@ -1,0 +1,62 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+# MongoDB Configuration - Replica Set Mode
+# Node: {{ inventory_hostname }}
+# ═══════════════════════════════════════════════════════════════════════════════
+
+#---------------------------------------
+# Where and how to store data
+#---------------------------------------
+storage:
+  dbPath: {{ mongodb_data_path }}
+  journal:
+    enabled: true
+  wiredTiger:
+    engineConfig:
+      cacheSizeGB: {{ mongodb_wiredtiger_cache_gb }}
+    collectionConfig:
+      blockCompressor: snappy
+    indexConfig:
+      prefixCompression: true
+
+#---------------------------------------
+# Where to write logging data
+#---------------------------------------
+systemLog:
+  destination: file
+  logAppend: true
+  path: {{ mongodb_log_path }}/mongod.log
+  logRotate: reopen
+
+#---------------------------------------
+# Network interfaces
+#---------------------------------------
+net:
+  port: {{ mongodb_port }}
+  bindIp: {{ ansible_host }},127.0.0.1
+
+#---------------------------------------
+# Process Management
+#---------------------------------------
+processManagement:
+  timeZoneInfo: /usr/share/zoneinfo
+  fork: false
+
+#---------------------------------------
+# Security
+#---------------------------------------
+security:
+  authorization: enabled
+  keyFile: /etc/mongodb/keyfile
+
+#---------------------------------------
+# Replication
+#---------------------------------------
+replication:
+  replSetName: {{ mongodb_replicaset_name }}
+
+#---------------------------------------
+# Operation Profiling
+#---------------------------------------
+operationProfiling:
+  mode: slowOp
+  slowOpThresholdMs: 100

@@ -1,0 +1,195 @@
+---
+# HAProxy Load Balancer Setup
+# نصب و پیکربندی HAProxy برای توزیع بار
+
+- name: Setup HAProxy Load Balancer
+  hosts: loadbalancers
+  become: yes
+  
+  tasks:
+    #=========================================
+    # 1. Install HAProxy
+    #=========================================
+    - name: Install HAProxy
+      apt:
+        name:
+          - haproxy
+          - hatop
+          - socat
+        state: present
+        update_cache: yes
+      tags: install
+
+    - name: Enable HAProxy service
+      lineinfile:
+        path: /etc/default/haproxy
+        regexp: '^ENABLED'
+        line: 'ENABLED=1'
+      tags: install
+
+    #=========================================
+    # 2. Create SSL Certificate Directory
+    #=========================================
+    - name: Create certificate directory
+      file:
+        path: /etc/haproxy/certs
+        state: directory
+        mode: '0700'
+        owner: root
+        group: root
+      tags: ssl
+
+    - name: Copy SSL certificate (if exists)
+      copy:
+        src: "{{ item }}"
+        dest: /etc/haproxy/certs/
+        mode: '0600'
+      loop: "{{ lookup('fileglob', 'files/certs/*.pem', wantlist=True) }}"
+      notify: Reload HAProxy
+      ignore_errors: yes
+      tags: ssl
+
+    #=========================================
+    # 3. Configure HAProxy
+    #=========================================
+    - name: Create HAProxy configuration
+      template:
+        src: templates/haproxy.cfg.j2
+        dest: /etc/haproxy/haproxy.cfg
+        mode: '0644'
+        validate: 'haproxy -c -f %s'
+      notify: Restart HAProxy
+      tags: config
+
+    #=========================================
+    # 4. Enable Kernel Parameters
+    #=========================================
+    - name: Enable kernel parameters for HAProxy
+      sysctl:
+        name: "{{ item.name }}"
+        value: "{{ item.value }}"
+        sysctl_file: /etc/sysctl.d/99-haproxy.conf
+        reload: yes
+      loop:
+        - { name: 'net.ipv4.ip_nonlocal_bind', value: '1' }
+        - { name: 'net.ipv4.tcp_tw_reuse', value: '1' }
+        - { name: 'net.core.somaxconn', value: '65535' }
+        - { name: 'net.ipv4.tcp_max_syn_backlog', value: '65535' }
+      tags: kernel
+
+    #=========================================
+    # 5. Configure Logging
+    #=========================================
+    - name: Configure rsyslog for HAProxy
+      copy:
+        dest: /etc/rsyslog.d/49-haproxy.conf
+        content: |
+          # HAProxy logging
+          $ModLoad imudp
+          $UDPServerRun 514
+          
+          local0.* /var/log/haproxy.log
+          local1.* /var/log/haproxy-traffic.log
+        mode: '0644'
+      notify: Restart rsyslog
+      tags: logging
+
+    - name: Create log rotation for HAProxy
+      copy:
+        dest: /etc/logrotate.d/haproxy
+        content: |
+          /var/log/haproxy.log
+          /var/log/haproxy-traffic.log {
+              daily
+              rotate 30
+              missingok
+              notifempty
+              compress
+              delaycompress
+              sharedscripts
+              postrotate
+                  /bin/kill -HUP $(cat /var/run/rsyslogd.pid 2>/dev/null) 2>/dev/null || true
+              endscript
+          }
+        mode: '0644'
+      tags: logging
+
+    #=========================================
+    # 6. Start HAProxy
+    #=========================================
+    - name: Start and enable HAProxy
+      systemd:
+        name: haproxy
+        state: started
+        enabled: yes
+      tags: service
+
+    #=========================================
+    # 7. Firewall Configuration
+    #=========================================
+    - name: Allow HAProxy ports
+      ufw:
+        rule: allow
+        port: "{{ item }}"
+        proto: tcp
+      loop:
+        - "{{ haproxy_frontend_port }}"
+        - "{{ haproxy_frontend_ssl_port }}"
+        - "{{ haproxy_stats_port }}"
+      when: ansible_facts.packages['ufw'] is defined
+      tags: firewall
+
+    #=========================================
+    # 8. Show Status
+    #=========================================
+    - name: Get HAProxy version
+      command: haproxy -v
+      register: haproxy_version
+      changed_when: false
+      tags: status
+
+    - name: Display HAProxy info
+      debug:
+        msg: |
+          ╔════════════════════════════════════════════════════════════════╗
+          ║              ⚖️  HAProxy Load Balancer Configured               ║
+          ╠════════════════════════════════════════════════════════════════╣
+          ║                                                                ║
+          ║  Version: {{ haproxy_version.stdout_lines[0] }}
+          ║                                                                ║
+          ║  Frontend:                                                     ║
+          ║    HTTP:  http://{{ ansible_host }}:{{ haproxy_frontend_port }}
+          ║    HTTPS: https://{{ ansible_host }}:{{ haproxy_frontend_ssl_port }}
+          ║                                                                ║
+          ║  Stats Dashboard:                                              ║
+          ║    URL: http://{{ ansible_host }}:{{ haproxy_stats_port }}/stats
+          ║    User: {{ haproxy_stats_user }}                              ║
+          ║                                                                ║
+          ║  Backend Servers (Web):                                        ║
+          {% for host in groups['webservers'] %}
+          ║    - {{ host }}: {{ hostvars[host].ansible_host }} (weight: {{ hostvars[host].weight | default(100) }})
+          {% endfor %}
+          ║                                                                ║
+          ║  Backend Servers (API):                                        ║
+          {% for host in groups['api_servers'] %}
+          ║    - {{ host }}: {{ hostvars[host].ansible_host }}
+          {% endfor %}
+          ║                                                                ║
+          ╚════════════════════════════════════════════════════════════════╝
+      tags: status
+
+  handlers:
+    - name: Restart HAProxy
+      systemd:
+        name: haproxy
+        state: restarted
+
+    - name: Reload HAProxy
+      systemd:
+        name: haproxy
+        state: reloaded
+
+    - name: Restart rsyslog
+      systemd:
+        name: rsyslog
+        state: restarted

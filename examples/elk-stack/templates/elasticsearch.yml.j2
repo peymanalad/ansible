@@ -1,0 +1,79 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+# Elasticsearch Configuration
+# Node: {{ es_node_name }}
+# ═══════════════════════════════════════════════════════════════════════════════
+
+#---------------------------------------
+# Cluster Settings
+#---------------------------------------
+cluster.name: {{ es_cluster_name }}
+node.name: {{ es_node_name }}
+node.roles: {{ es_node_roles | to_json }}
+
+#---------------------------------------
+# Path Settings
+#---------------------------------------
+path.data: {{ es_data_path }}
+path.logs: {{ es_log_path }}
+
+#---------------------------------------
+# Network Settings
+#---------------------------------------
+network.host: {{ ansible_host }}
+http.port: 9200
+transport.port: 9300
+
+#---------------------------------------
+# Discovery Settings
+#---------------------------------------
+discovery.seed_hosts:
+{% for host in groups['elasticsearch'] %}
+  - {{ hostvars[host]['ansible_host'] }}:9300
+{% endfor %}
+
+# اگر برای اولین بار کلاستر را راه‌اندازی می‌کنید، این خط را فعال کنید
+# و پس از راه‌اندازی موفق، کامنت کنید
+{% if es_master_eligible %}
+cluster.initial_master_nodes:
+{% for host in groups['elasticsearch'] if hostvars[host]['es_master_eligible'] | default(false) %}
+  - {{ hostvars[host]['es_node_name'] }}
+{% endfor %}
+{% endif %}
+
+#---------------------------------------
+# Security Settings
+#---------------------------------------
+{% if es_security_enabled %}
+xpack.security.enabled: true
+xpack.security.enrollment.enabled: true
+
+# SSL for HTTP
+xpack.security.http.ssl:
+  enabled: true
+  keystore.path: certs/http.p12
+
+# SSL for Transport
+xpack.security.transport.ssl:
+  enabled: true
+  verification_mode: certificate
+  keystore.path: certs/transport.p12
+  truststore.path: certs/transport.p12
+{% else %}
+xpack.security.enabled: false
+{% endif %}
+
+#---------------------------------------
+# Memory Settings
+#---------------------------------------
+bootstrap.memory_lock: true
+
+#---------------------------------------
+# Index Settings
+#---------------------------------------
+action.destructive_requires_name: true
+
+#---------------------------------------
+# Monitoring
+#---------------------------------------
+xpack.monitoring.collection.enabled: true
+xpack.monitoring.elasticsearch.collection.enabled: true

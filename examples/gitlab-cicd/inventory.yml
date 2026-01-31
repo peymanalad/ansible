@@ -1,0 +1,96 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+# 📦 GitLab CE with CI/CD - Complete Setup
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# 🎯 هدف این Playbook:
+#    نصب و راه‌اندازی کامل GitLab Community Edition با CI/CD Runner
+#
+# ✅ کارهایی که انجام می‌شود:
+#    1. نصب GitLab CE از repository رسمی
+#    2. تنظیم SSL با Let's Encrypt
+#    3. تنظیم Email (SMTP)
+#    4. تنظیم Container Registry
+#    5. نصب GitLab Runner برای CI/CD
+#    6. تنظیم backup خودکار
+#    7. بهینه‌سازی performance
+#
+# ⚠️ پیش‌نیازها:
+#    - حداقل 4GB RAM (پیشنهادی 8GB+)
+#    - حداقل 20GB فضای دیسک
+#    - دامنه معتبر برای SSL
+#
+# 📋 نحوه اجرا:
+#    ansible-playbook -i inventory.yml site.yml --ask-vault-pass
+#
+# 🔐 پس از نصب:
+#    - Root password در فایل /etc/gitlab/initial_root_password
+#    - یا: gitlab-rake "gitlab:password:reset[root]"
+#
+# ═══════════════════════════════════════════════════════════════════════════════
+
+---
+all:
+  children:
+    gitlab_servers:
+      hosts:
+        gitlab:
+          ansible_host: 192.168.1.80
+    
+    gitlab_runners:
+      hosts:
+        runner-1:
+          ansible_host: 192.168.1.81
+          runner_name: docker-runner-1
+          runner_executor: docker
+          runner_tags:
+            - docker
+            - linux
+        runner-2:
+          ansible_host: 192.168.1.82
+          runner_name: shell-runner-1
+          runner_executor: shell
+          runner_tags:
+            - shell
+            - deploy
+  
+  vars:
+    # GitLab settings
+    gitlab_domain: gitlab.example.com
+    gitlab_external_url: "https://{{ gitlab_domain }}"
+    
+    # SSL
+    gitlab_ssl_enabled: true
+    gitlab_letsencrypt_enabled: true
+    gitlab_letsencrypt_email: admin@example.com
+    
+    # Container Registry
+    gitlab_registry_enabled: true
+    gitlab_registry_domain: registry.example.com
+    
+    # Pages (optional)
+    gitlab_pages_enabled: false
+    gitlab_pages_domain: pages.example.com
+    
+    # SMTP settings
+    gitlab_smtp_enabled: true
+    gitlab_smtp_server: smtp.gmail.com
+    gitlab_smtp_port: 587
+    gitlab_smtp_user: "gitlab@example.com"
+    gitlab_smtp_password: "{{ vault_gitlab_smtp_password }}"
+    gitlab_smtp_domain: example.com
+    gitlab_email_from: "gitlab@example.com"
+    gitlab_email_reply_to: "noreply@example.com"
+    
+    # Performance tuning
+    gitlab_puma_workers: 2
+    gitlab_sidekiq_concurrency: 10
+    gitlab_postgresql_shared_buffers: "256MB"
+    
+    # Backup settings
+    gitlab_backup_enabled: true
+    gitlab_backup_path: /var/opt/gitlab/backups
+    gitlab_backup_keep_time: 604800  # 7 days in seconds
+    
+    # Runner settings
+    gitlab_runner_token: "{{ vault_gitlab_runner_token }}"
+    gitlab_runner_docker_image: "docker:24.0"

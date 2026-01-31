@@ -1,0 +1,53 @@
+---
+# HAProxy Load Balancer Configuration
+# تنظیم Load Balancer با HAProxy
+
+all:
+  children:
+    loadbalancers:
+      hosts:
+        lb-1:
+          ansible_host: 192.168.1.5
+          haproxy_stats_user: admin
+          haproxy_stats_password: "{{ vault_haproxy_stats_password }}"
+    
+    webservers:
+      hosts:
+        web-1:
+          ansible_host: 192.168.1.10
+          weight: 100
+        web-2:
+          ansible_host: 192.168.1.11
+          weight: 100
+        web-3:
+          ansible_host: 192.168.1.12
+          weight: 50  # Lower weight for less powerful server
+    
+    api_servers:
+      hosts:
+        api-1:
+          ansible_host: 192.168.1.20
+        api-2:
+          ansible_host: 192.168.1.21
+  
+  vars:
+    # HAProxy settings
+    haproxy_frontend_port: 80
+    haproxy_frontend_ssl_port: 443
+    haproxy_stats_port: 8404
+    
+    # SSL certificate path
+    ssl_cert_path: /etc/haproxy/certs/example.com.pem
+    
+    # Health check settings
+    health_check_uri: /health
+    health_check_interval: 5s
+    health_check_timeout: 2s
+    
+    # Load balancing algorithm
+    lb_algorithm: roundrobin  # roundrobin, leastconn, source
+    
+    # Rate limiting
+    rate_limit_enabled: true
+    rate_limit_requests: 100
+    rate_limit_period: 10s

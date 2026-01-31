@@ -1,0 +1,46 @@
+---
+# Zero-Downtime Web Application Deployment
+# دیپلوی اپلیکیشن وب بدون Downtime
+
+all:
+  children:
+    webservers:
+      hosts:
+        web-1:
+          ansible_host: 192.168.1.10
+        web-2:
+          ansible_host: 192.168.1.11
+        web-3:
+          ansible_host: 192.168.1.12
+  
+  vars:
+    # Application settings
+    app_name: myapp
+    app_user: www-data
+    app_group: www-data
+    app_base_path: /var/www/{{ app_name }}
+    
+    # Deployment settings
+    deploy_via: git  # git or artifact
+    git_repo: https://github.com/company/myapp.git
+    git_branch: main
+    
+    # For artifact deployment
+    artifact_url: "https://releases.company.com/myapp/{{ app_version }}.tar.gz"
+    
+    # Keep last N releases
+    keep_releases: 5
+    
+    # Pre/Post hooks
+    run_migrations: true
+    run_npm_build: true
+    run_composer: true
+    
+    # Health check
+    health_check_url: "http://localhost/health"
+    health_check_retries: 10
+    health_check_delay: 3
+    
+    # Load balancer (if using)
+    haproxy_socket: /run/haproxy/admin.sock
+    haproxy_backend: web_backend

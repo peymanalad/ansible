@@ -1,0 +1,417 @@
+---
+# Monitoring Stack Setup
+# Prometheus + Grafana + Node Exporter + Alertmanager
+
+#===============================================
+# Part 1: Install Node Exporter on all targets
+#===============================================
+- name: Install Node Exporter on target servers
+  hosts: targets
+  become: yes
+  
+  vars:
+    node_exporter_version: "1.7.0"
+    node_exporter_port: 9100
+  
+  tasks:
+    - name: Create node_exporter user
+      user:
+        name: node_exporter
+        shell: /sbin/nologin
+        system: yes
+        create_home: no
+    
+    - name: Download Node Exporter
+      get_url:
+        url: "https://github.com/prometheus/node_exporter/releases/download/v{{ node_exporter_version }}/node_exporter-{{ node_exporter_version }}.linux-amd64.tar.gz"
+        dest: /tmp/node_exporter.tar.gz
+        mode: '0644'
+    
+    - name: Extract Node Exporter
+      unarchive:
+        src: /tmp/node_exporter.tar.gz
+        dest: /tmp
+        remote_src: yes
+    
+    - name: Move Node Exporter binary
+      copy:
+        src: "/tmp/node_exporter-{{ node_exporter_version }}.linux-amd64/node_exporter"
+        dest: /usr/local/bin/node_exporter
+        remote_src: yes
+        owner: root
+        group: root
+        mode: '0755'
+    
+    - name: Create Node Exporter systemd service
+      copy:
+        dest: /etc/systemd/system/node_exporter.service
+        content: |
+          [Unit]
+          Description=Prometheus Node Exporter
+          After=network-online.target
+          
+          [Service]
+          User=node_exporter
+          Group=node_exporter
+          Type=simple
+          ExecStart=/usr/local/bin/node_exporter \
+            --collector.systemd \
+            --collector.processes \
+            --web.listen-address=:{{ node_exporter_port }}
+          Restart=always
+          RestartSec=3
+          
+          [Install]
+          WantedBy=multi-user.target
+        mode: '0644'
+      notify: Restart node_exporter
+    
+    - name: Start and enable Node Exporter
+      systemd:
+        name: node_exporter
+        state: started
+        enabled: yes
+        daemon_reload: yes
+    
+    - name: Allow Node Exporter port
+      ufw:
+        rule: allow
+        port: "{{ node_exporter_port }}"
+        proto: tcp
+        from_ip: "{{ hostvars['monitor-server'].ansible_host }}"
+      when: ansible_facts.packages['ufw'] is defined
+  
+  handlers:
+    - name: Restart node_exporter
+      systemd:
+        name: node_exporter
+        state: restarted
+
+#===============================================
+# Part 2: Install Prometheus on monitoring server
+#===============================================
+- name: Install Prometheus
+  hosts: monitoring
+  become: yes
+  
+  vars:
+    prometheus_version: "2.48.0"
+    prometheus_port: 9090
+    prometheus_data_dir: /var/lib/prometheus
+    prometheus_config_dir: /etc/prometheus
+  
+  tasks:
+    - name: Create prometheus user
+      user:
+        name: prometheus
+        shell: /sbin/nologin
+        system: yes
+        create_home: no
+    
+    - name: Create Prometheus directories
+      file:
+        path: "{{ item }}"
+        state: directory
+        owner: prometheus
+        group: prometheus
+        mode: '0755'
+      loop:
+        - "{{ prometheus_data_dir }}"
+        - "{{ prometheus_config_dir }}"
+        - "{{ prometheus_config_dir }}/rules"
+    
+    - name: Download Prometheus
+      get_url:
+        url: "https://github.com/prometheus/prometheus/releases/download/v{{ prometheus_version }}/prometheus-{{ prometheus_version }}.linux-amd64.tar.gz"
+        dest: /tmp/prometheus.tar.gz
+    
+    - name: Extract Prometheus
+      unarchive:
+        src: /tmp/prometheus.tar.gz
+        dest: /tmp
+        remote_src: yes
+    
+    - name: Copy Prometheus binaries
+      copy:
+        src: "/tmp/prometheus-{{ prometheus_version }}.linux-amd64/{{ item }}"
+        dest: "/usr/local/bin/{{ item }}"
+        remote_src: yes
+        owner: root
+        group: root
+        mode: '0755'
+      loop:
+        - prometheus
+        - promtool
+    
+    - name: Create Prometheus config
+      template:
+        src: templates/prometheus.yml.j2
+        dest: "{{ prometheus_config_dir }}/prometheus.yml"
+        owner: prometheus
+        group: prometheus
+        mode: '0644'
+      notify: Reload prometheus
+    
+    - name: Create alert rules
+      template:
+        src: templates/alert_rules.yml.j2
+        dest: "{{ prometheus_config_dir }}/rules/alerts.yml"
+        owner: prometheus
+        group: prometheus
+        mode: '0644'
+      notify: Reload prometheus
+    
+    - name: Create Prometheus systemd service
+      copy:
+        dest: /etc/systemd/system/prometheus.service
+        content: |
+          [Unit]
+          Description=Prometheus
+          After=network-online.target
+          
+          [Service]
+          User=prometheus
+          Group=prometheus
+          Type=simple
+          ExecStart=/usr/local/bin/prometheus \
+            --config.file={{ prometheus_config_dir }}/prometheus.yml \
+            --storage.tsdb.path={{ prometheus_data_dir }} \
+            --storage.tsdb.retention.time={{ prometheus_retention | default('15d') }} \
+            --web.console.templates=/etc/prometheus/consoles \
+            --web.console.libraries=/etc/prometheus/console_libraries \
+            --web.listen-address=:{{ prometheus_port }}
+          ExecReload=/bin/kill -HUP $MAINPID
+          Restart=always
+          RestartSec=3
+          
+          [Install]
+          WantedBy=multi-user.target
+        mode: '0644'
+    
+    - name: Start and enable Prometheus
+      systemd:
+        name: prometheus
+        state: started
+        enabled: yes
+        daemon_reload: yes
+  
+  handlers:
+    - name: Reload prometheus
+      systemd:
+        name: prometheus
+        state: reloaded
+
+#===============================================
+# Part 3: Install Grafana
+#===============================================
+- name: Install Grafana
+  hosts: monitoring
+  become: yes
+  
+  vars:
+    grafana_port: 3000
+    grafana_admin_user: admin
+  
+  tasks:
+    - name: Install required packages
+      apt:
+        name:
+          - apt-transport-https
+          - software-properties-common
+        state: present
+        update_cache: yes
+    
+    - name: Add Grafana GPG key
+      apt_key:
+        url: https://apt.grafana.com/gpg.key
+        state: present
+    
+    - name: Add Grafana repository
+      apt_repository:
+        repo: "deb https://apt.grafana.com stable main"
+        state: present
+        filename: grafana
+    
+    - name: Install Grafana
+      apt:
+        name: grafana
+        state: present
+        update_cache: yes
+    
+    - name: Configure Grafana
+      ini_file:
+        path: /etc/grafana/grafana.ini
+        section: "{{ item.section }}"
+        option: "{{ item.option }}"
+        value: "{{ item.value }}"
+      loop:
+        - { section: "server", option: "http_port", value: "{{ grafana_port }}" }
+        - { section: "security", option: "admin_user", value: "{{ grafana_admin_user }}" }
+        - { section: "security", option: "admin_password", value: "{{ grafana_admin_password }}" }
+        - { section: "users", option: "allow_sign_up", value: "false" }
+      notify: Restart grafana
+      no_log: true
+    
+    - name: Start and enable Grafana
+      systemd:
+        name: grafana-server
+        state: started
+        enabled: yes
+    
+    - name: Wait for Grafana to start
+      wait_for:
+        port: "{{ grafana_port }}"
+        delay: 5
+        timeout: 60
+    
+    - name: Add Prometheus datasource to Grafana
+      grafana_datasource:
+        name: "Prometheus"
+        grafana_url: "http://localhost:{{ grafana_port }}"
+        grafana_user: "{{ grafana_admin_user }}"
+        grafana_password: "{{ grafana_admin_password }}"
+        ds_type: prometheus
+        ds_url: "http://localhost:9090"
+        is_default: yes
+  
+  handlers:
+    - name: Restart grafana
+      systemd:
+        name: grafana-server
+        state: restarted
+
+#===============================================
+# Part 4: Install Alertmanager
+#===============================================
+- name: Install Alertmanager
+  hosts: monitoring
+  become: yes
+  
+  vars:
+    alertmanager_version: "0.26.0"
+    alertmanager_port: 9093
+    alertmanager_config_dir: /etc/alertmanager
+    alertmanager_data_dir: /var/lib/alertmanager
+    
+    # Slack notification
+    slack_webhook_url: "{{ vault_slack_webhook | default('') }}"
+    slack_channel: "#alerts"
+    
+    # Email notification
+    smtp_server: "smtp.gmail.com:587"
+    smtp_from: "alerts@example.com"
+    alert_receivers:
+      - "admin@example.com"
+  
+  tasks:
+    - name: Create alertmanager user
+      user:
+        name: alertmanager
+        shell: /sbin/nologin
+        system: yes
+        create_home: no
+    
+    - name: Create Alertmanager directories
+      file:
+        path: "{{ item }}"
+        state: directory
+        owner: alertmanager
+        group: alertmanager
+        mode: '0755'
+      loop:
+        - "{{ alertmanager_config_dir }}"
+        - "{{ alertmanager_data_dir }}"
+    
+    - name: Download Alertmanager
+      get_url:
+        url: "https://github.com/prometheus/alertmanager/releases/download/v{{ alertmanager_version }}/alertmanager-{{ alertmanager_version }}.linux-amd64.tar.gz"
+        dest: /tmp/alertmanager.tar.gz
+    
+    - name: Extract Alertmanager
+      unarchive:
+        src: /tmp/alertmanager.tar.gz
+        dest: /tmp
+        remote_src: yes
+    
+    - name: Copy Alertmanager binary
+      copy:
+        src: "/tmp/alertmanager-{{ alertmanager_version }}.linux-amd64/alertmanager"
+        dest: /usr/local/bin/alertmanager
+        remote_src: yes
+        owner: root
+        group: root
+        mode: '0755'
+    
+    - name: Create Alertmanager config
+      template:
+        src: templates/alertmanager.yml.j2
+        dest: "{{ alertmanager_config_dir }}/alertmanager.yml"
+        owner: alertmanager
+        group: alertmanager
+        mode: '0644'
+      notify: Restart alertmanager
+    
+    - name: Create Alertmanager systemd service
+      copy:
+        dest: /etc/systemd/system/alertmanager.service
+        content: |
+          [Unit]
+          Description=Alertmanager
+          After=network-online.target
+          
+          [Service]
+          User=alertmanager
+          Group=alertmanager
+          Type=simple
+          ExecStart=/usr/local/bin/alertmanager \
+            --config.file={{ alertmanager_config_dir }}/alertmanager.yml \
+            --storage.path={{ alertmanager_data_dir }} \
+            --web.listen-address=:{{ alertmanager_port }}
+          Restart=always
+          RestartSec=3
+          
+          [Install]
+          WantedBy=multi-user.target
+        mode: '0644'
+    
+    - name: Start and enable Alertmanager
+      systemd:
+        name: alertmanager
+        state: started
+        enabled: yes
+        daemon_reload: yes
+  
+  handlers:
+    - name: Restart alertmanager
+      systemd:
+        name: alertmanager
+        state: restarted
+
+#===============================================
+# Part 5: Final Summary
+#===============================================
+- name: Display monitoring stack info
+  hosts: monitoring
+  
+  tasks:
+    - name: Show access information
+      debug:
+        msg: |
+          ╔════════════════════════════════════════════════════════════╗
+          ║           🎉 Monitoring Stack Deployed!                    ║
+          ╠════════════════════════════════════════════════════════════╣
+          ║                                                            ║
+          ║  Prometheus:    http://{{ ansible_host }}:9090             ║
+          ║  Grafana:       http://{{ ansible_host }}:3000             ║
+          ║  Alertmanager:  http://{{ ansible_host }}:9093             ║
+          ║                                                            ║
+          ║  Grafana Login:                                            ║
+          ║    Username: admin                                         ║
+          ║    Password: <your_vault_password>                         ║
+          ║                                                            ║
+          ║  Monitored Hosts:                                          ║
+          {% for host in groups['targets'] %}
+          ║    - {{ host }}: {{ hostvars[host].ansible_host }}:9100    ║
+          {% endfor %}
+          ║                                                            ║
+          ╚════════════════════════════════════════════════════════════╝

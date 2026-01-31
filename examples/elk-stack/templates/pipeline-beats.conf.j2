@@ -1,0 +1,123 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+# Logstash Pipeline: Beats Input (Filebeat, Metricbeat, etc.)
+# ═══════════════════════════════════════════════════════════════════════════════
+# دریافت داده‌ها از Beats clients
+
+input {
+  beats {
+    port => 5044
+    ssl => false
+    # اگر SSL فعال است:
+    # ssl => true
+    # ssl_certificate => "/etc/logstash/certs/logstash.crt"
+    # ssl_key => "/etc/logstash/certs/logstash.key"
+    tags => ["beats"]
+  }
+  
+  # HTTP input for JSON logs
+  http {
+    port => 8080
+    codec => json
+    tags => ["http-input"]
+  }
+}
+
+filter {
+  # Filebeat: Add source info
+  if [agent][type] == "filebeat" {
+    mutate {
+      add_field => { "source_type" => "filebeat" }
+    }
+    
+    # Parse JSON logs if detected
+    if [message] =~ /^\{/ {
+      json {
+        source => "message"
+        target => "parsed_json"
+        skip_on_invalid_json => true
+      }
+    }
+  }
+  
+  # Metricbeat: Keep metrics as-is
+  if [agent][type] == "metricbeat" {
+    mutate {
+      add_field => { "source_type" => "metricbeat" }
+    }
+  }
+  
+  # Application logs (generic)
+  if [fields][application] {
+    mutate {
+      add_field => { "app_name" => "%{[fields][application]}" }
+    }
+    
+    # Parse common log formats
+    if [message] =~ /\[(ERROR|WARN|INFO|DEBUG)\]/ {
+      grok {
+        match => {
+          "message" => '\[%{TIMESTAMP_ISO8601:log_timestamp}\] \[%{WORD:log_level}\] %{GREEDYDATA:log_message}'
+        }
+        overwrite => ["message"]
+      }
+    }
+  }
+  
+  # Add common fields
+  mutate {
+    add_field => { "received_by" => "{{ inventory_hostname }}" }
+  }
+  
+  # Cleanup
+  mutate {
+    remove_field => ["[agent][ephemeral_id]", "[ecs]"]
+  }
+}
+
+output {
+  # Filebeat logs -> different indices based on fields
+  if [agent][type] == "filebeat" {
+    if [fields][log_type] {
+      elasticsearch {
+        hosts => [{% for host in groups['elasticsearch'] %}"https://{{ hostvars[host]['ansible_host'] }}:9200"{% if not loop.last %}, {% endif %}{% endfor %}]
+        user => "elastic"
+        password => "{{ es_elastic_password }}"
+        ssl_certificate_verification => false
+        index => "%{[fields][log_type]}-%{+YYYY.MM.dd}"
+      }
+    } else {
+      elasticsearch {
+        hosts => [{% for host in groups['elasticsearch'] %}"https://{{ hostvars[host]['ansible_host'] }}:9200"{% if not loop.last %}, {% endif %}{% endfor %}]
+        user => "elastic"
+        password => "{{ es_elastic_password }}"
+        ssl_certificate_verification => false
+        index => "filebeat-%{+YYYY.MM.dd}"
+      }
+    }
+  }
+  
+  # Metricbeat -> metricbeat index
+  if [agent][type] == "metricbeat" {
+    elasticsearch {
+      hosts => [{% for host in groups['elasticsearch'] %}"https://{{ hostvars[host]['ansible_host'] }}:9200"{% if not loop.last %}, {% endif %}{% endfor %}]
+      user => "elastic"
+      password => "{{ es_elastic_password }}"
+      ssl_certificate_verification => false
+      index => "metricbeat-%{+YYYY.MM.dd}"
+    }
+  }
+  
+  # HTTP input -> custom index
+  if "http-input" in [tags] {
+    elasticsearch {
+      hosts => [{% for host in groups['elasticsearch'] %}"https://{{ hostvars[host]['ansible_host'] }}:9200"{% if not loop.last %}, {% endif %}{% endfor %}]
+      user => "elastic"
+      password => "{{ es_elastic_password }}"
+      ssl_certificate_verification => false
+      index => "http-logs-%{+YYYY.MM.dd}"
+    }
+  }
+  
+  # Debug output (comment in production)
+  # stdout { codec => rubydebug }
+}

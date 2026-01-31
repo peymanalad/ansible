@@ -1,0 +1,328 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+# 📦 GitLab CE + CI/CD Runners Installation Playbook
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# 🎯 هدف:
+#    نصب کامل GitLab با Container Registry و GitLab Runners
+#
+# ═══════════════════════════════════════════════════════════════════════════════
+
+---
+#===============================================
+# Part 1: Install GitLab CE
+#===============================================
+- name: Install GitLab CE
+  hosts: gitlab_servers
+  become: yes
+  
+  tasks:
+    #-----------------------------------------
+    # Prerequisites
+    #-----------------------------------------
+    - name: Check minimum memory
+      assert:
+        that:
+          - ansible_memtotal_mb >= 4000
+        fail_msg: "GitLab requires at least 4GB RAM. Current: {{ ansible_memtotal_mb }}MB"
+      tags: prereq
+
+    - name: Install required packages
+      apt:
+        name:
+          - curl
+          - openssh-server
+          - ca-certificates
+          - tzdata
+          - perl
+          - postfix
+        state: present
+        update_cache: yes
+      tags: prereq
+
+    #-----------------------------------------
+    # Install GitLab
+    #-----------------------------------------
+    - name: Add GitLab repository script
+      get_url:
+        url: https://packages.gitlab.com/install/repositories/gitlab/gitlab-ce/script.deb.sh
+        dest: /tmp/gitlab-repo.sh
+        mode: '0755'
+      tags: install
+
+    - name: Run GitLab repository script
+      command: /tmp/gitlab-repo.sh
+      args:
+        creates: /etc/apt/sources.list.d/gitlab_gitlab-ce.list
+      tags: install
+
+    - name: Install GitLab CE
+      apt:
+        name: gitlab-ce
+        state: present
+        update_cache: yes
+      environment:
+        EXTERNAL_URL: "{{ gitlab_external_url }}"
+      tags: install
+
+    #-----------------------------------------
+    # Configure GitLab
+    #-----------------------------------------
+    - name: Configure GitLab
+      template:
+        src: templates/gitlab.rb.j2
+        dest: /etc/gitlab/gitlab.rb
+        owner: root
+        group: root
+        mode: '0600'
+        backup: yes
+      notify: Reconfigure GitLab
+      tags: config
+
+    - name: Ensure GitLab is configured
+      command: gitlab-ctl reconfigure
+      args:
+        creates: /var/opt/gitlab/.gitconfig
+      tags: config
+
+    #-----------------------------------------
+    # Backup Setup
+    #-----------------------------------------
+    - name: Create backup script
+      copy:
+        dest: /usr/local/bin/gitlab_backup.sh
+        mode: '0755'
+        content: |
+          #!/bin/bash
+          # ═══════════════════════════════════════════════════════════
+          # GitLab Backup Script
+          # ═══════════════════════════════════════════════════════════
+          
+          LOG_FILE="/var/log/gitlab/backup.log"
+          
+          echo "========================================" >> $LOG_FILE
+          echo "Backup started: $(date)" >> $LOG_FILE
+          
+          # Create backup
+          gitlab-backup create CRON=1 >> $LOG_FILE 2>&1
+          
+          # Backup configuration files
+          gitlab-ctl backup-etc >> $LOG_FILE 2>&1
+          
+          echo "Backup completed: $(date)" >> $LOG_FILE
+      when: gitlab_backup_enabled
+      tags: backup
+
+    - name: Setup backup cron
+      cron:
+        name: "GitLab backup"
+        minute: "0"
+        hour: "2"
+        job: "/usr/local/bin/gitlab_backup.sh"
+        user: root
+      when: gitlab_backup_enabled
+      tags: backup
+
+    #-----------------------------------------
+    # Display Info
+    #-----------------------------------------
+    - name: Get initial root password
+      command: cat /etc/gitlab/initial_root_password
+      register: root_password
+      ignore_errors: yes
+      changed_when: false
+      no_log: true
+      tags: status
+
+    - name: Display GitLab info
+      debug:
+        msg: |
+          ╔════════════════════════════════════════════════════════════════╗
+          ║              🦊 GitLab CE Setup Complete!                       ║
+          ╠════════════════════════════════════════════════════════════════╣
+          ║                                                                ║
+          ║  URL: {{ gitlab_external_url }}
+          ║  Registry: https://{{ gitlab_registry_domain }}
+          ║                                                                ║
+          ║  📝 Login:                                                     ║
+          ║    Username: root                                              ║
+          ║    Password: Check /etc/gitlab/initial_root_password           ║
+          ║                                                                ║
+          ║  📊 Commands:                                                  ║
+          ║    gitlab-ctl status        - Check services                   ║
+          ║    gitlab-ctl reconfigure   - Apply config changes             ║
+          ║    gitlab-ctl restart       - Restart all services             ║
+          ║    gitlab-rake gitlab:check - Health check                     ║
+          ║                                                                ║
+          ║  🔐 Reset root password:                                       ║
+          ║    gitlab-rake "gitlab:password:reset[root]"                   ║
+          ║                                                                ║
+          ╚════════════════════════════════════════════════════════════════╝
+      tags: status
+
+  handlers:
+    - name: Reconfigure GitLab
+      command: gitlab-ctl reconfigure
+
+#===============================================
+# Part 2: Install GitLab Runners
+#===============================================
+- name: Install GitLab Runners
+  hosts: gitlab_runners
+  become: yes
+  
+  tasks:
+    #-----------------------------------------
+    # Install Docker (for Docker executor)
+    #-----------------------------------------
+    - name: Install Docker prerequisites
+      apt:
+        name:
+          - ca-certificates
+          - curl
+          - gnupg
+          - lsb-release
+        state: present
+        update_cache: yes
+      when: runner_executor == 'docker'
+      tags: docker
+
+    - name: Add Docker GPG key
+      apt_key:
+        url: https://download.docker.com/linux/ubuntu/gpg
+        state: present
+      when: runner_executor == 'docker'
+      tags: docker
+
+    - name: Add Docker repository
+      apt_repository:
+        repo: "deb [arch=amd64] https://download.docker.com/linux/ubuntu {{ ansible_distribution_release }} stable"
+        state: present
+      when: runner_executor == 'docker'
+      tags: docker
+
+    - name: Install Docker
+      apt:
+        name:
+          - docker-ce
+          - docker-ce-cli
+          - containerd.io
+        state: present
+        update_cache: yes
+      when: runner_executor == 'docker'
+      tags: docker
+
+    - name: Start Docker
+      systemd:
+        name: docker
+        state: started
+        enabled: yes
+      when: runner_executor == 'docker'
+      tags: docker
+
+    #-----------------------------------------
+    # Install GitLab Runner
+    #-----------------------------------------
+    - name: Add GitLab Runner repository
+      get_url:
+        url: https://packages.gitlab.com/install/repositories/runner/gitlab-runner/script.deb.sh
+        dest: /tmp/runner-repo.sh
+        mode: '0755'
+      tags: runner
+
+    - name: Run GitLab Runner repository script
+      command: /tmp/runner-repo.sh
+      args:
+        creates: /etc/apt/sources.list.d/runner_gitlab-runner.list
+      tags: runner
+
+    - name: Install GitLab Runner
+      apt:
+        name: gitlab-runner
+        state: present
+        update_cache: yes
+      tags: runner
+
+    #-----------------------------------------
+    # Register Runner
+    #-----------------------------------------
+    - name: Check if runner is registered
+      command: gitlab-runner verify
+      register: runner_verify
+      ignore_errors: yes
+      changed_when: false
+      tags: register
+
+    - name: Register Docker runner
+      command: >
+        gitlab-runner register
+        --non-interactive
+        --url "{{ hostvars[groups['gitlab_servers'][0]].gitlab_external_url }}"
+        --token "{{ gitlab_runner_token }}"
+        --executor "docker"
+        --docker-image "{{ gitlab_runner_docker_image }}"
+        --description "{{ runner_name }}"
+        --tag-list "{{ runner_tags | join(',') }}"
+        --docker-privileged
+        --docker-volumes "/var/run/docker.sock:/var/run/docker.sock"
+      when: 
+        - runner_executor == 'docker'
+        - runner_verify.rc != 0
+      no_log: true
+      tags: register
+
+    - name: Register Shell runner
+      command: >
+        gitlab-runner register
+        --non-interactive
+        --url "{{ hostvars[groups['gitlab_servers'][0]].gitlab_external_url }}"
+        --token "{{ gitlab_runner_token }}"
+        --executor "shell"
+        --description "{{ runner_name }}"
+        --tag-list "{{ runner_tags | join(',') }}"
+      when: 
+        - runner_executor == 'shell'
+        - runner_verify.rc != 0
+      no_log: true
+      tags: register
+
+    #-----------------------------------------
+    # Configure Runner
+    #-----------------------------------------
+    - name: Configure runner concurrency
+      lineinfile:
+        path: /etc/gitlab-runner/config.toml
+        regexp: '^concurrent'
+        line: 'concurrent = 4'
+      notify: Restart GitLab Runner
+      tags: config
+
+    - name: Start GitLab Runner
+      systemd:
+        name: gitlab-runner
+        state: started
+        enabled: yes
+      tags: service
+
+    - name: Display Runner info
+      debug:
+        msg: |
+          ╔════════════════════════════════════════════════════════════════╗
+          ║              🏃 GitLab Runner Configured!                       ║
+          ╠════════════════════════════════════════════════════════════════╣
+          ║  Name: {{ runner_name }}
+          ║  Executor: {{ runner_executor }}
+          ║  Tags: {{ runner_tags | join(', ') }}
+          ║                                                                ║
+          ║  📊 Commands:                                                  ║
+          ║    gitlab-runner status    - Check status                      ║
+          ║    gitlab-runner verify    - Verify connection                 ║
+          ║    gitlab-runner list      - List runners                      ║
+          ║                                                                ║
+          ╚════════════════════════════════════════════════════════════════╝
+      tags: status
+
+  handlers:
+    - name: Restart GitLab Runner
+      systemd:
+        name: gitlab-runner
+        state: restarted

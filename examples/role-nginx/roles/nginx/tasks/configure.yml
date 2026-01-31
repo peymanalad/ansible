@@ -1,0 +1,49 @@
+---
+# Configure Nginx
+
+- name: Deploy main nginx.conf
+  template:
+    src: nginx.conf.j2
+    dest: "{{ nginx_conf_dir }}/nginx.conf"
+    owner: root
+    group: root
+    mode: '0644'
+    validate: 'nginx -t -c %s'
+  notify: Reload nginx
+
+- name: Deploy SSL parameters snippet
+  template:
+    src: ssl-params.conf.j2
+    dest: "{{ nginx_snippets_dir }}/ssl-params.conf"
+    owner: root
+    group: root
+    mode: '0644'
+  notify: Reload nginx
+
+- name: Deploy security headers snippet
+  template:
+    src: security-headers.conf.j2
+    dest: "{{ nginx_snippets_dir }}/security-headers.conf"
+    owner: root
+    group: root
+    mode: '0644'
+  notify: Reload nginx
+
+- name: Deploy gzip settings snippet
+  template:
+    src: gzip.conf.j2
+    dest: "{{ nginx_snippets_dir }}/gzip.conf"
+    owner: root
+    group: root
+    mode: '0644'
+  notify: Reload nginx
+
+- name: Remove default nginx site
+  file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - "{{ nginx_sites_enabled }}/default"
+    - "{{ nginx_sites_available }}/default"
+  when: nginx_remove_default | bool
+  notify: Reload nginx

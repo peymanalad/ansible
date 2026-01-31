@@ -1,0 +1,250 @@
+---
+# User Management Playbook
+# مدیریت کامل کاربران، گروه‌ها و SSH Keys
+
+- name: Manage Users and SSH Keys
+  hosts: servers
+  become: yes
+  
+  vars:
+    # Default settings for all users
+    default_shell: /bin/bash
+    default_home_base: /home
+    ssh_key_options: 'no-port-forwarding,no-X11-forwarding,no-agent-forwarding'
+  
+  tasks:
+    #=========================================
+    # 1. Create Required Groups
+    #=========================================
+    - name: Create custom groups
+      group:
+        name: "{{ item }}"
+        state: present
+      loop:
+        - developers
+        - deployers
+        - sysadmins
+      tags: groups
+
+    #=========================================
+    # 2. Create Admin Users
+    #=========================================
+    - name: Create admin users
+      user:
+        name: "{{ item.username }}"
+        comment: "{{ item.full_name }}"
+        shell: "{{ item.shell | default(default_shell) }}"
+        groups: "{{ item.groups | join(',') }}"
+        append: yes
+        state: present
+        create_home: yes
+        password: "{{ item.password | default('!') }}"  # Locked if no password
+      loop: "{{ admin_users }}"
+      tags: users
+
+    - name: Configure SSH keys for admin users
+      authorized_key:
+        user: "{{ item.0.username }}"
+        key: "{{ item.1 }}"
+        state: present
+        exclusive: "{{ item.0.exclusive_keys | default(false) }}"
+      loop: "{{ admin_users | subelements('ssh_keys') }}"
+      tags: ssh-keys
+
+    #=========================================
+    # 3. Create Regular Users
+    #=========================================
+    - name: Create regular users
+      user:
+        name: "{{ item.username }}"
+        comment: "{{ item.full_name }}"
+        shell: "{{ item.shell | default(default_shell) }}"
+        groups: "{{ item.groups | join(',') }}"
+        append: yes
+        state: present
+        create_home: yes
+      loop: "{{ regular_users | default([]) }}"
+      tags: users
+
+    - name: Configure SSH keys for regular users
+      authorized_key:
+        user: "{{ item.0.username }}"
+        key: "{{ item.1 }}"
+        state: present
+      loop: "{{ regular_users | default([]) | subelements('ssh_keys') }}"
+      tags: ssh-keys
+
+    #=========================================
+    # 4. Create Service Accounts
+    #=========================================
+    - name: Create service accounts
+      user:
+        name: "{{ item.username }}"
+        comment: "{{ item.full_name }}"
+        shell: "{{ item.shell | default('/usr/sbin/nologin') }}"
+        home: "{{ item.home | default(default_home_base + '/' + item.username) }}"
+        groups: "{{ item.groups | join(',') }}"
+        append: yes
+        state: present
+        create_home: yes
+        system: yes
+      loop: "{{ service_accounts | default([]) }}"
+      tags: service-accounts
+
+    - name: Configure SSH keys for service accounts (with restrictions)
+      authorized_key:
+        user: "{{ item.0.username }}"
+        key: "{{ ssh_key_options }} {{ item.1 }}"
+        state: present
+      loop: "{{ service_accounts | default([]) | subelements('ssh_keys', skip_missing=True) }}"
+      tags: ssh-keys
+
+    #=========================================
+    # 5. Configure Sudo Access
+    #=========================================
+    - name: Create sudoers file for admin users
+      copy:
+        dest: "/etc/sudoers.d/{{ item.username }}"
+        content: |
+          # Ansible managed - {{ item.username }}
+          {{ item.username }} ALL=(ALL:ALL) {% if item.nopasswd | default(false) %}NOPASSWD:{% endif %}ALL
+        mode: '0440'
+        validate: 'visudo -cf %s'
+      loop: "{{ admin_users }}"
+      when: "'sudo' in item.groups"
+      tags: sudo
+
+    - name: Create developers group sudoers (limited)
+      copy:
+        dest: /etc/sudoers.d/developers
+        content: |
+          # Ansible managed - Developer group
+          %developers ALL=(ALL) NOPASSWD: /usr/bin/docker, /usr/bin/docker-compose
+          %developers ALL=(ALL) NOPASSWD: /bin/systemctl restart myapp.service
+          %developers ALL=(ALL) NOPASSWD: /bin/journalctl
+        mode: '0440'
+        validate: 'visudo -cf %s'
+      tags: sudo
+
+    #=========================================
+    # 6. Remove Old Users
+    #=========================================
+    - name: Remove old users
+      user:
+        name: "{{ item }}"
+        state: absent
+        remove: yes
+        force: yes
+      loop: "{{ removed_users | default([]) }}"
+      tags: remove-users
+
+    - name: Remove sudoers files for removed users
+      file:
+        path: "/etc/sudoers.d/{{ item }}"
+        state: absent
+      loop: "{{ removed_users | default([]) }}"
+      tags: remove-users
+
+    #=========================================
+    # 7. Set Password Policy
+    #=========================================
+    - name: Set password expiration for non-service accounts
+      command: "chage -M 90 -W 14 {{ item.username }}"
+      loop: "{{ admin_users + (regular_users | default([])) }}"
+      changed_when: false
+      tags: password-policy
+
+    #=========================================
+    # 8. Create User Environment Files
+    #=========================================
+    - name: Create .bashrc for admin users
+      copy:
+        dest: "/home/{{ item.username }}/.bashrc"
+        content: |
+          # Ansible Managed Bashrc
+          
+          # If not running interactively, don't do anything
+          case $- in
+              *i*) ;;
+                *) return;;
+          esac
+          
+          # History settings
+          HISTCONTROL=ignoreboth
+          HISTSIZE=10000
+          HISTFILESIZE=20000
+          HISTTIMEFORMAT="%F %T "
+          
+          # Aliases
+          alias ll='ls -alF'
+          alias la='ls -A'
+          alias l='ls -CF'
+          alias ..='cd ..'
+          alias ...='cd ../..'
+          alias grep='grep --color=auto'
+          alias ports='netstat -tulanp'
+          alias df='df -h'
+          alias du='du -h'
+          alias free='free -h'
+          
+          # Docker aliases
+          alias dps='docker ps'
+          alias dpsa='docker ps -a'
+          alias di='docker images'
+          alias dlog='docker logs -f'
+          alias dex='docker exec -it'
+          
+          # System aliases
+          alias slog='sudo journalctl -f'
+          alias reload='sudo systemctl daemon-reload'
+          
+          # Git aliases
+          alias gs='git status'
+          alias gl='git log --oneline -10'
+          alias gp='git pull'
+          
+          # Prompt
+          PS1='\[\033[01;32m\]\u@\h\[\033[00m\]:\[\033[01;34m\]\w\[\033[00m\]\$ '
+          
+          # Enable completion
+          if [ -f /etc/bash_completion ]; then
+              . /etc/bash_completion
+          fi
+        owner: "{{ item.username }}"
+        group: "{{ item.username }}"
+        mode: '0644'
+      loop: "{{ admin_users }}"
+      tags: environment
+
+    #=========================================
+    # 9. Report Created Users
+    #=========================================
+    - name: Show user summary
+      debug:
+        msg: |
+          ════════════════════════════════════════════════════════════
+          User Management Summary for {{ inventory_hostname }}
+          ════════════════════════════════════════════════════════════
+          
+          ✅ Admin Users (with sudo):
+          {% for user in admin_users %}
+            - {{ user.username }} ({{ user.full_name }})
+          {% endfor %}
+          
+          ✅ Regular Users:
+          {% for user in regular_users | default([]) %}
+            - {{ user.username }} ({{ user.full_name }})
+          {% endfor %}
+          
+          ✅ Service Accounts:
+          {% for user in service_accounts | default([]) %}
+            - {{ user.username }} ({{ user.full_name }})
+          {% endfor %}
+          
+          ❌ Removed Users:
+          {% for user in removed_users | default([]) %}
+            - {{ user }}
+          {% endfor %}
+          
+          ════════════════════════════════════════════════════════════
+      tags: always

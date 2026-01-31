@@ -1,0 +1,137 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+# Loki Configuration
+# ═══════════════════════════════════════════════════════════════════════════════
+
+auth_enabled: false
+
+server:
+  http_listen_port: {{ loki_http_port }}
+  grpc_listen_port: {{ loki_grpc_port }}
+  log_level: info
+
+#---------------------------------------
+# Common Settings
+#---------------------------------------
+common:
+  path_prefix: {{ loki_data_path }}
+  storage:
+{% if storage_type == 's3' %}
+    s3:
+      endpoint: {{ s3_endpoint }}
+      bucketnames: {{ s3_bucket }}
+      access_key_id: {{ s3_access_key }}
+      secret_access_key: {{ s3_secret_key }}
+      s3forcepathstyle: true
+{% else %}
+    filesystem:
+      chunks_directory: {{ loki_data_path }}/chunks
+      rules_directory: {{ loki_data_path }}/rules
+{% endif %}
+  replication_factor: 1
+  ring:
+    instance_addr: {{ ansible_host }}
+    kvstore:
+      store: inmemory
+
+#---------------------------------------
+# Schema Config
+#---------------------------------------
+schema_config:
+  configs:
+    - from: 2020-10-24
+      store: boltdb-shipper
+      object_store: {{ storage_type }}
+      schema: v11
+      index:
+        prefix: index_
+        period: 24h
+
+#---------------------------------------
+# Storage Config
+#---------------------------------------
+storage_config:
+  boltdb_shipper:
+    active_index_directory: {{ loki_data_path }}/boltdb-shipper-active
+    cache_location: {{ loki_data_path }}/boltdb-shipper-cache
+    cache_ttl: 24h
+    shared_store: {{ storage_type }}
+{% if storage_type == 'filesystem' %}
+  filesystem:
+    directory: {{ loki_data_path }}/chunks
+{% endif %}
+
+#---------------------------------------
+# Compactor
+#---------------------------------------
+compactor:
+  working_directory: {{ loki_data_path }}/boltdb-shipper-compactor
+  shared_store: {{ storage_type }}
+  compaction_interval: 10m
+  retention_enabled: true
+  retention_delete_delay: 2h
+  retention_delete_worker_count: 150
+
+#---------------------------------------
+# Limits Config
+#---------------------------------------
+limits_config:
+  enforce_metric_name: false
+  reject_old_samples: true
+  reject_old_samples_max_age: 168h
+  ingestion_rate_mb: 16
+  ingestion_burst_size_mb: 24
+  max_query_series: 5000
+  max_query_parallelism: 32
+  retention_period: {{ loki_retention_period }}
+
+#---------------------------------------
+# Ingester
+#---------------------------------------
+ingester:
+  lifecycler:
+    address: 127.0.0.1
+    ring:
+      kvstore:
+        store: inmemory
+      replication_factor: 1
+    final_sleep: 0s
+  chunk_idle_period: 1h
+  max_chunk_age: 1h
+  chunk_target_size: 1048576
+  chunk_retain_period: 30s
+  max_transfer_retries: 0
+  wal:
+    enabled: true
+    dir: {{ loki_data_path }}/wal
+
+#---------------------------------------
+# Query Range
+#---------------------------------------
+query_range:
+  results_cache:
+    cache:
+      embedded_cache:
+        enabled: true
+        max_size_mb: 100
+
+#---------------------------------------
+# Ruler (Alerting)
+#---------------------------------------
+ruler:
+  storage:
+    type: local
+    local:
+      directory: {{ loki_data_path }}/rules
+  rule_path: {{ loki_data_path }}/rules_tmp
+  alertmanager_url: {{ alertmanager_url }}
+  ring:
+    kvstore:
+      store: inmemory
+  enable_api: true
+
+#---------------------------------------
+# Table Manager
+#---------------------------------------
+table_manager:
+  retention_deletes_enabled: true
+  retention_period: {{ loki_retention_period }}

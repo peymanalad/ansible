@@ -1,0 +1,357 @@
+---
+# Zero-Downtime Deployment Playbook
+# دیپلوی Rolling بدون قطعی سرویس
+
+- name: Zero-Downtime Application Deployment
+  hosts: webservers
+  become: yes
+  serial: 1  # Deploy one server at a time
+  max_fail_percentage: 0  # Stop if any server fails
+  
+  vars:
+    timestamp: "{{ ansible_date_time.epoch }}"
+    release_path: "{{ app_base_path }}/releases/{{ timestamp }}"
+    current_path: "{{ app_base_path }}/current"
+    shared_path: "{{ app_base_path }}/shared"
+  
+  pre_tasks:
+    #=========================================
+    # 1. Pre-deployment checks
+    #=========================================
+    - name: Check if deployment is already in progress
+      stat:
+        path: "{{ app_base_path }}/.deploy_lock"
+      register: deploy_lock
+      tags: always
+
+    - name: Fail if deployment in progress
+      fail:
+        msg: "Another deployment is already in progress!"
+      when: deploy_lock.stat.exists
+      tags: always
+
+    - name: Create deployment lock
+      file:
+        path: "{{ app_base_path }}/.deploy_lock"
+        state: touch
+      tags: always
+
+    #=========================================
+    # 2. Remove from load balancer
+    #=========================================
+    - name: Disable server in HAProxy
+      command: >
+        echo "disable server {{ haproxy_backend }}/{{ inventory_hostname }}" | 
+        socat stdio {{ haproxy_socket }}
+      delegate_to: "{{ groups['loadbalancers'][0] }}"
+      when: 
+        - groups['loadbalancers'] is defined
+        - groups['loadbalancers'] | length > 0
+      ignore_errors: yes
+      tags: loadbalancer
+
+    - name: Wait for connections to drain
+      pause:
+        seconds: 10
+      when: groups['loadbalancers'] is defined
+      tags: loadbalancer
+
+  tasks:
+    #=========================================
+    # 3. Setup directory structure
+    #=========================================
+    - name: Ensure directory structure exists
+      file:
+        path: "{{ item }}"
+        state: directory
+        owner: "{{ app_user }}"
+        group: "{{ app_group }}"
+        mode: '0755'
+      loop:
+        - "{{ app_base_path }}"
+        - "{{ app_base_path }}/releases"
+        - "{{ shared_path }}"
+        - "{{ shared_path }}/storage"
+        - "{{ shared_path }}/logs"
+        - "{{ shared_path }}/uploads"
+      tags: setup
+
+    #=========================================
+    # 4. Clone/Download new release
+    #=========================================
+    - name: Clone repository (git deployment)
+      git:
+        repo: "{{ git_repo }}"
+        dest: "{{ release_path }}"
+        version: "{{ git_branch }}"
+        depth: 1
+        accept_hostkey: yes
+      become_user: "{{ app_user }}"
+      when: deploy_via == 'git'
+      tags: deploy
+
+    - name: Download artifact (artifact deployment)
+      block:
+        - name: Create release directory
+          file:
+            path: "{{ release_path }}"
+            state: directory
+            owner: "{{ app_user }}"
+            group: "{{ app_group }}"
+
+        - name: Download and extract artifact
+          unarchive:
+            src: "{{ artifact_url }}"
+            dest: "{{ release_path }}"
+            remote_src: yes
+            owner: "{{ app_user }}"
+            group: "{{ app_group }}"
+      when: deploy_via == 'artifact'
+      tags: deploy
+
+    #=========================================
+    # 5. Create shared symlinks
+    #=========================================
+    - name: Link shared directories
+      file:
+        src: "{{ shared_path }}/{{ item }}"
+        dest: "{{ release_path }}/{{ item }}"
+        state: link
+        owner: "{{ app_user }}"
+        group: "{{ app_group }}"
+      loop:
+        - storage
+        - logs
+        - uploads
+      tags: deploy
+
+    - name: Link shared files
+      file:
+        src: "{{ shared_path }}/.env"
+        dest: "{{ release_path }}/.env"
+        state: link
+        owner: "{{ app_user }}"
+        group: "{{ app_group }}"
+      when: shared_env | default(true)
+      ignore_errors: yes
+      tags: deploy
+
+    #=========================================
+    # 6. Install dependencies
+    #=========================================
+    - name: Install Composer dependencies
+      command: composer install --no-dev --optimize-autoloader --no-interaction
+      args:
+        chdir: "{{ release_path }}"
+      become_user: "{{ app_user }}"
+      when: run_composer | default(false)
+      tags: dependencies
+
+    - name: Install NPM dependencies
+      command: npm ci --production
+      args:
+        chdir: "{{ release_path }}"
+      become_user: "{{ app_user }}"
+      when: run_npm_build | default(false)
+      tags: dependencies
+
+    - name: Build frontend assets
+      command: npm run build
+      args:
+        chdir: "{{ release_path }}"
+      become_user: "{{ app_user }}"
+      when: run_npm_build | default(false)
+      tags: dependencies
+
+    #=========================================
+    # 7. Run migrations
+    #=========================================
+    - name: Run database migrations
+      command: php artisan migrate --force
+      args:
+        chdir: "{{ release_path }}"
+      become_user: "{{ app_user }}"
+      when: run_migrations | default(false)
+      run_once: true  # Only run on first server
+      tags: migrations
+
+    #=========================================
+    # 8. Cache and optimize
+    #=========================================
+    - name: Clear application cache
+      command: "{{ item }}"
+      args:
+        chdir: "{{ release_path }}"
+      become_user: "{{ app_user }}"
+      loop:
+        - php artisan config:cache
+        - php artisan route:cache
+        - php artisan view:cache
+      when: app_type | default('laravel') == 'laravel'
+      ignore_errors: yes
+      tags: cache
+
+    #=========================================
+    # 9. Set permissions
+    #=========================================
+    - name: Set correct ownership
+      file:
+        path: "{{ release_path }}"
+        owner: "{{ app_user }}"
+        group: "{{ app_group }}"
+        recurse: yes
+      tags: permissions
+
+    - name: Set directory permissions
+      command: find {{ release_path }} -type d -exec chmod 755 {} \;
+      tags: permissions
+
+    - name: Set file permissions
+      command: find {{ release_path }} -type f -exec chmod 644 {} \;
+      tags: permissions
+
+    #=========================================
+    # 10. Switch to new release (atomic)
+    #=========================================
+    - name: Update current symlink
+      file:
+        src: "{{ release_path }}"
+        dest: "{{ current_path }}"
+        state: link
+        force: yes
+      tags: switch
+
+    #=========================================
+    # 11. Restart services
+    #=========================================
+    - name: Restart PHP-FPM
+      systemd:
+        name: php-fpm
+        state: reloaded
+      ignore_errors: yes
+      tags: restart
+
+    - name: Restart application queue workers
+      command: php artisan queue:restart
+      args:
+        chdir: "{{ current_path }}"
+      become_user: "{{ app_user }}"
+      when: app_type | default('laravel') == 'laravel'
+      ignore_errors: yes
+      tags: restart
+
+    #=========================================
+    # 12. Health check
+    #=========================================
+    - name: Wait for application to respond
+      uri:
+        url: "{{ health_check_url }}"
+        status_code: 200
+        timeout: 5
+      register: health_result
+      until: health_result.status == 200
+      retries: "{{ health_check_retries }}"
+      delay: "{{ health_check_delay }}"
+      tags: health
+
+    #=========================================
+    # 13. Cleanup old releases
+    #=========================================
+    - name: Get list of releases
+      find:
+        paths: "{{ app_base_path }}/releases"
+        file_type: directory
+      register: releases
+      tags: cleanup
+
+    - name: Remove old releases
+      file:
+        path: "{{ item.path }}"
+        state: absent
+      loop: "{{ (releases.files | sort(attribute='mtime') | list)[:-keep_releases] }}"
+      when: releases.files | length > keep_releases
+      tags: cleanup
+
+  post_tasks:
+    #=========================================
+    # 14. Re-enable in load balancer
+    #=========================================
+    - name: Enable server in HAProxy
+      command: >
+        echo "enable server {{ haproxy_backend }}/{{ inventory_hostname }}" | 
+        socat stdio {{ haproxy_socket }}
+      delegate_to: "{{ groups['loadbalancers'][0] }}"
+      when: 
+        - groups['loadbalancers'] is defined
+        - groups['loadbalancers'] | length > 0
+      ignore_errors: yes
+      tags: loadbalancer
+
+    - name: Wait for server to receive traffic
+      pause:
+        seconds: 5
+      tags: loadbalancer
+
+    - name: Remove deployment lock
+      file:
+        path: "{{ app_base_path }}/.deploy_lock"
+        state: absent
+      tags: always
+
+    - name: Deployment complete notification
+      debug:
+        msg: |
+          ✅ Deployment successful on {{ inventory_hostname }}
+          Release: {{ timestamp }}
+          Path: {{ release_path }}
+      tags: always
+
+#=========================================
+# Rollback Play
+#=========================================
+- name: Rollback to Previous Release
+  hosts: webservers
+  become: yes
+  
+  vars:
+    current_path: "{{ app_base_path }}/current"
+  
+  tasks:
+    - name: Get current release
+      stat:
+        path: "{{ current_path }}"
+      register: current_link
+      tags: rollback
+
+    - name: Get list of releases
+      find:
+        paths: "{{ app_base_path }}/releases"
+        file_type: directory
+      register: releases
+      tags: rollback
+
+    - name: Find previous release
+      set_fact:
+        previous_release: "{{ (releases.files | sort(attribute='mtime') | list)[-2].path }}"
+      when: 
+        - releases.files | length >= 2
+        - rollback | default(false) | bool
+      tags: rollback
+
+    - name: Switch to previous release
+      file:
+        src: "{{ previous_release }}"
+        dest: "{{ current_path }}"
+        state: link
+        force: yes
+      when: 
+        - previous_release is defined
+        - rollback | default(false) | bool
+      tags: rollback
+
+    - name: Restart PHP-FPM after rollback
+      systemd:
+        name: php-fpm
+        state: reloaded
+      when: rollback | default(false) | bool
+      tags: rollback

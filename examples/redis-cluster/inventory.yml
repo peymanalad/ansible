@@ -1,0 +1,83 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+# 📦 Redis Cluster Inventory
+# ═══════════════════════════════════════════════════════════════════════════════
+# 🎯 هدف: تعریف سرورهای Redis Cluster با 3 Master و 3 Replica
+# ═══════════════════════════════════════════════════════════════════════════════
+
+all:
+  vars:
+    ansible_user: root
+    ansible_ssh_private_key_file: ~/.ssh/id_rsa
+    
+    # ═══ Redis Settings ═══
+    redis_version: "7.2"
+    redis_port: 6379
+    redis_cluster_port: 16379
+    redis_password: "CHANGE_ME_STRONG_PASSWORD"
+    
+    # ═══ Memory Settings ═══
+    redis_maxmemory: "2gb"
+    redis_maxmemory_policy: "allkeys-lru"
+    
+    # ═══ Persistence ═══
+    redis_appendonly: "yes"
+    redis_appendfsync: "everysec"
+    redis_rdb_save:
+      - "900 1"
+      - "300 10"
+      - "60 10000"
+    
+    # ═══ Paths ═══
+    redis_data_dir: "/var/lib/redis"
+    redis_log_dir: "/var/log/redis"
+    redis_config_dir: "/etc/redis"
+    
+    # ═══ Cluster Settings ═══
+    redis_cluster_enabled: true
+    redis_cluster_replicas: 1
+
+  children:
+    #---------------------------------------
+    # گره‌های Master
+    #---------------------------------------
+    redis_masters:
+      hosts:
+        redis-master-1:
+          ansible_host: 192.168.1.110
+          redis_cluster_slot_start: 0
+          redis_cluster_slot_end: 5460
+          
+        redis-master-2:
+          ansible_host: 192.168.1.111
+          redis_cluster_slot_start: 5461
+          redis_cluster_slot_end: 10922
+          
+        redis-master-3:
+          ansible_host: 192.168.1.112
+          redis_cluster_slot_start: 10923
+          redis_cluster_slot_end: 16383
+
+    #---------------------------------------
+    # گره‌های Replica
+    #---------------------------------------
+    redis_replicas:
+      hosts:
+        redis-replica-1:
+          ansible_host: 192.168.1.113
+          redis_master_host: 192.168.1.110
+          
+        redis-replica-2:
+          ansible_host: 192.168.1.114
+          redis_master_host: 192.168.1.111
+          
+        redis-replica-3:
+          ansible_host: 192.168.1.115
+          redis_master_host: 192.168.1.112
+
+    #---------------------------------------
+    # همه گره‌ها
+    #---------------------------------------
+    redis_cluster:
+      children:
+        redis_masters:
+        redis_replicas:

@@ -1,0 +1,36 @@
+---
+# Nginx Role - Example Complete Role
+# نمونه یک Role کامل و حرفه‌ای
+
+all:
+  hosts:
+    web-1:
+      ansible_host: 192.168.1.10
+    web-2:
+      ansible_host: 192.168.1.11
+  
+  vars:
+    nginx_worker_processes: auto
+    nginx_worker_connections: 4096
+    nginx_multi_accept: "on"
+    nginx_sendfile: "on"
+    nginx_tcp_nopush: "on"
+    nginx_tcp_nodelay: "on"
+    nginx_keepalive_timeout: 65
+    nginx_gzip: "on"
+    
+    nginx_sites:
+      - name: example.com
+        server_name: example.com www.example.com
+        root: /var/www/example.com
+        index: index.php index.html
+        ssl: true
+        ssl_cert: /etc/letsencrypt/live/example.com/fullchain.pem
+        ssl_key: /etc/letsencrypt/live/example.com/privkey.pem
+        php: true
+        
+      - name: api.example.com
+        server_name: api.example.com
+        root: /var/www/api
+        proxy_pass: http://localhost:3000
+        ssl: true

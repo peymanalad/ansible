@@ -1,0 +1,426 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+# 📦 Loki Stack Deployment (Grafana + Loki + Promtail)
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# 🎯 هدف:
+#    راه‌اندازی سیستم جمع‌آوری و مشاهده لاگ‌ها با Loki Stack:
+#    - Loki: ذخیره‌سازی و ایندکس کردن لاگ‌ها (مشابه Prometheus برای لاگ‌ها)
+#    - Grafana: داشبورد و Visualization
+#    - Promtail: جمع‌آوری لاگ‌ها از سرورها و ارسال به Loki
+#
+# ✅ مزایای Loki نسبت به ELK:
+#    - مصرف منابع بسیار کمتر
+#    - تنظیمات ساده‌تر
+#    - یکپارچگی عالی با Grafana
+#    - هزینه ذخیره‌سازی کمتر
+#
+# ✅ کارهایی که انجام می‌شود:
+#    1. نصب و کانفیگ Loki Server
+#    2. نصب و کانفیگ Grafana با DataSource
+#    3. نصب Promtail روی همه سرورها
+#    4. تنظیم داشبورد لاگ‌ها در Grafana
+#    5. تنظیم alerting rules
+#
+# 📋 نحوه اجرا:
+#    ansible-playbook -i inventory.yml site.yml
+#    ansible-playbook -i inventory.yml site.yml --tags loki
+#    ansible-playbook -i inventory.yml site.yml --tags grafana
+#    ansible-playbook -i inventory.yml site.yml --tags promtail
+#
+# 📊 Tags موجود:
+#    - loki: نصب و کانفیگ Loki
+#    - grafana: نصب و کانفیگ Grafana
+#    - promtail: نصب Promtail clients
+#    - dashboards: ایمپورت داشبوردها
+#
+# ═══════════════════════════════════════════════════════════════════════════════
+
+---
+# ═══════════════════════════════════════════════════════════════════════════════
+# نصب و کانفیگ Loki Server
+# ═══════════════════════════════════════════════════════════════════════════════
+- name: نصب و پیکربندی Loki
+  hosts: loki
+  become: yes
+  tags: [loki]
+  
+  tasks:
+    #---------------------------------------------------------------------------
+    # ساخت کاربر و دایرکتوری‌ها
+    #---------------------------------------------------------------------------
+    - name: ساخت کاربر loki
+      user:
+        name: loki
+        system: yes
+        shell: /usr/sbin/nologin
+        create_home: no
+
+    - name: ساخت دایرکتوری‌ها
+      file:
+        path: "{{ item }}"
+        state: directory
+        owner: loki
+        group: loki
+        mode: '0755'
+      loop:
+        - /etc/loki
+        - "{{ loki_data_path }}"
+        - "{{ loki_data_path }}/chunks"
+        - "{{ loki_data_path }}/boltdb-shipper-active"
+        - "{{ loki_data_path }}/boltdb-shipper-cache"
+        - /var/log/loki
+
+    #---------------------------------------------------------------------------
+    # دانلود و نصب Loki
+    #---------------------------------------------------------------------------
+    - name: دانلود Loki
+      get_url:
+        url: "https://github.com/grafana/loki/releases/download/v{{ loki_version }}/loki-linux-amd64.zip"
+        dest: /tmp/loki.zip
+        mode: '0644'
+
+    - name: نصب unzip
+      package:
+        name: unzip
+        state: present
+
+    - name: استخراج Loki
+      unarchive:
+        src: /tmp/loki.zip
+        dest: /usr/local/bin/
+        remote_src: yes
+        creates: /usr/local/bin/loki-linux-amd64
+
+    - name: تنظیم permissions
+      file:
+        path: /usr/local/bin/loki-linux-amd64
+        mode: '0755'
+
+    - name: ساخت symlink
+      file:
+        src: /usr/local/bin/loki-linux-amd64
+        dest: /usr/local/bin/loki
+        state: link
+
+    #---------------------------------------------------------------------------
+    # کانفیگ Loki
+    #---------------------------------------------------------------------------
+    - name: کانفیگ loki
+      template:
+        src: templates/loki-config.yml.j2
+        dest: /etc/loki/config.yml
+        owner: loki
+        group: loki
+        mode: '0640'
+      notify: restart loki
+
+    #---------------------------------------------------------------------------
+    # Systemd Service
+    #---------------------------------------------------------------------------
+    - name: ساخت Loki systemd service
+      copy:
+        dest: /etc/systemd/system/loki.service
+        content: |
+          [Unit]
+          Description=Loki Log Aggregation System
+          After=network-online.target
+          Wants=network-online.target
+          
+          [Service]
+          Type=simple
+          User=loki
+          Group=loki
+          ExecStart=/usr/local/bin/loki -config.file=/etc/loki/config.yml
+          Restart=on-failure
+          RestartSec=5
+          LimitNOFILE=65536
+          
+          [Install]
+          WantedBy=multi-user.target
+      notify: restart loki
+
+    - name: فعال‌سازی و استارت Loki
+      systemd:
+        name: loki
+        enabled: yes
+        state: started
+        daemon_reload: yes
+
+    - name: انتظار برای آماده شدن Loki
+      wait_for:
+        host: "{{ ansible_host }}"
+        port: "{{ loki_http_port }}"
+        delay: 5
+        timeout: 60
+
+  handlers:
+    - name: restart loki
+      systemd:
+        name: loki
+        state: restarted
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# نصب و کانفیگ Grafana
+# ═══════════════════════════════════════════════════════════════════════════════
+- name: نصب و پیکربندی Grafana
+  hosts: grafana
+  become: yes
+  tags: [grafana]
+  
+  tasks:
+    #---------------------------------------------------------------------------
+    # نصب Grafana
+    #---------------------------------------------------------------------------
+    - name: اضافه کردن Grafana GPG key (Debian)
+      apt_key:
+        url: https://apt.grafana.com/gpg.key
+        state: present
+      when: ansible_os_family == 'Debian'
+
+    - name: اضافه کردن Grafana repository (Debian)
+      apt_repository:
+        repo: "deb https://apt.grafana.com stable main"
+        state: present
+        filename: grafana
+      when: ansible_os_family == 'Debian'
+
+    - name: اضافه کردن Grafana repository (RedHat)
+      copy:
+        dest: /etc/yum.repos.d/grafana.repo
+        content: |
+          [grafana]
+          name=grafana
+          baseurl=https://rpm.grafana.com
+          repo_gpgcheck=1
+          enabled=1
+          gpgcheck=1
+          gpgkey=https://rpm.grafana.com/gpg.key
+          sslverify=1
+          sslcacert=/etc/pki/tls/certs/ca-bundle.crt
+      when: ansible_os_family == 'RedHat'
+
+    - name: نصب Grafana
+      package:
+        name: grafana
+        state: present
+
+    #---------------------------------------------------------------------------
+    # کانفیگ Grafana
+    #---------------------------------------------------------------------------
+    - name: کانفیگ grafana.ini
+      template:
+        src: templates/grafana.ini.j2
+        dest: /etc/grafana/grafana.ini
+        owner: root
+        group: grafana
+        mode: '0640'
+      notify: restart grafana
+
+    #---------------------------------------------------------------------------
+    # تنظیم DataSource - Loki
+    #---------------------------------------------------------------------------
+    - name: ساخت دایرکتوری provisioning
+      file:
+        path: "{{ item }}"
+        state: directory
+        owner: root
+        group: grafana
+        mode: '0755'
+      loop:
+        - /etc/grafana/provisioning/datasources
+        - /etc/grafana/provisioning/dashboards
+
+    - name: کانفیگ Loki datasource
+      copy:
+        dest: /etc/grafana/provisioning/datasources/loki.yml
+        content: |
+          apiVersion: 1
+          datasources:
+            - name: Loki
+              type: loki
+              access: proxy
+              url: http://{{ hostvars[groups['loki'][0]]['ansible_host'] }}:{{ loki_http_port }}
+              isDefault: true
+              editable: false
+              jsonData:
+                maxLines: 1000
+        owner: root
+        group: grafana
+        mode: '0640'
+      notify: restart grafana
+
+    #---------------------------------------------------------------------------
+    # سرویس Grafana
+    #---------------------------------------------------------------------------
+    - name: فعال‌سازی و استارت Grafana
+      systemd:
+        name: grafana-server
+        enabled: yes
+        state: started
+        daemon_reload: yes
+
+    - name: انتظار برای آماده شدن Grafana
+      wait_for:
+        host: "{{ ansible_host }}"
+        port: "{{ grafana_http_port }}"
+        delay: 5
+        timeout: 60
+
+  handlers:
+    - name: restart grafana
+      systemd:
+        name: grafana-server
+        state: restarted
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# نصب Promtail روی کلاینت‌ها
+# ═══════════════════════════════════════════════════════════════════════════════
+- name: نصب Promtail روی سرورها
+  hosts: promtail
+  become: yes
+  tags: [promtail]
+  
+  tasks:
+    #---------------------------------------------------------------------------
+    # ساخت کاربر و دایرکتوری‌ها
+    #---------------------------------------------------------------------------
+    - name: ساخت کاربر promtail
+      user:
+        name: promtail
+        system: yes
+        shell: /usr/sbin/nologin
+        create_home: no
+        groups: adm,systemd-journal
+        append: yes
+
+    - name: ساخت دایرکتوری‌ها
+      file:
+        path: "{{ item }}"
+        state: directory
+        owner: promtail
+        group: promtail
+        mode: '0755'
+      loop:
+        - /etc/promtail
+        - /var/lib/promtail
+
+    #---------------------------------------------------------------------------
+    # دانلود و نصب Promtail
+    #---------------------------------------------------------------------------
+    - name: دانلود Promtail
+      get_url:
+        url: "https://github.com/grafana/loki/releases/download/v{{ promtail_version }}/promtail-linux-amd64.zip"
+        dest: /tmp/promtail.zip
+        mode: '0644'
+
+    - name: نصب unzip
+      package:
+        name: unzip
+        state: present
+
+    - name: استخراج Promtail
+      unarchive:
+        src: /tmp/promtail.zip
+        dest: /usr/local/bin/
+        remote_src: yes
+        creates: /usr/local/bin/promtail-linux-amd64
+
+    - name: تنظیم permissions
+      file:
+        path: /usr/local/bin/promtail-linux-amd64
+        mode: '0755'
+
+    - name: ساخت symlink
+      file:
+        src: /usr/local/bin/promtail-linux-amd64
+        dest: /usr/local/bin/promtail
+        state: link
+
+    #---------------------------------------------------------------------------
+    # کانفیگ Promtail
+    #---------------------------------------------------------------------------
+    - name: کانفیگ Promtail
+      template:
+        src: templates/promtail-config.yml.j2
+        dest: /etc/promtail/config.yml
+        owner: promtail
+        group: promtail
+        mode: '0640'
+      notify: restart promtail
+
+    #---------------------------------------------------------------------------
+    # Systemd Service
+    #---------------------------------------------------------------------------
+    - name: ساخت Promtail systemd service
+      copy:
+        dest: /etc/systemd/system/promtail.service
+        content: |
+          [Unit]
+          Description=Promtail Log Collector
+          After=network-online.target
+          Wants=network-online.target
+          
+          [Service]
+          Type=simple
+          User=promtail
+          Group=promtail
+          ExecStart=/usr/local/bin/promtail -config.file=/etc/promtail/config.yml
+          Restart=on-failure
+          RestartSec=5
+          
+          [Install]
+          WantedBy=multi-user.target
+      notify: restart promtail
+
+    - name: فعال‌سازی و استارت Promtail
+      systemd:
+        name: promtail
+        enabled: yes
+        state: started
+        daemon_reload: yes
+
+  handlers:
+    - name: restart promtail
+      systemd:
+        name: promtail
+        state: restarted
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# نمایش اطلاعات نهایی
+# ═══════════════════════════════════════════════════════════════════════════════
+- name: نمایش اطلاعات دسترسی
+  hosts: grafana
+  become: no
+  gather_facts: no
+  tags: [always]
+  
+  tasks:
+    - name: نمایش اطلاعات
+      debug:
+        msg: |
+          ═══════════════════════════════════════════════════════════════════
+          ✅ Loki Stack با موفقیت نصب شد!
+          ═══════════════════════════════════════════════════════════════════
+          
+          📊 Grafana URL: http://{{ ansible_host }}:{{ grafana_http_port }}
+          
+          🔐 کاربر: {{ grafana_admin_user }}
+          🔑 رمز عبور: {{ grafana_admin_password }}
+          
+          📝 Loki URL: http://{{ hostvars[groups['loki'][0]]['ansible_host'] }}:{{ loki_http_port }}
+          
+          🔍 برای مشاهده لاگ‌ها:
+             1. وارد Grafana شوید
+             2. به Explore بروید
+             3. Loki را انتخاب کنید
+             4. از LogQL برای Query استفاده کنید
+          
+          📋 مثال‌های LogQL:
+             - همه لاگ‌ها: {job="varlogs"}
+             - فیلتر: {job="varlogs"} |= "error"
+             - Regex: {job="nginx"} |~ "5[0-9]{2}"
+          
+          ═══════════════════════════════════════════════════════════════════

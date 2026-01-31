@@ -1,0 +1,53 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+# RabbitMQ Configuration
+# Node: {{ inventory_hostname }}
+# ═══════════════════════════════════════════════════════════════════════════════
+
+#---------------------------------------
+# Network
+#---------------------------------------
+listeners.tcp.default = {{ rabbitmq_amqp_port }}
+management.tcp.port = {{ rabbitmq_management_port }}
+
+#---------------------------------------
+# Cluster
+#---------------------------------------
+cluster_name = {{ rabbitmq_cluster_name }}
+cluster_formation.peer_discovery_backend = classic_config
+cluster_formation.classic_config.nodes.1 = rabbit@{{ groups['rabbitmq'][0] }}
+{% for host in groups['rabbitmq'][1:] %}
+cluster_formation.classic_config.nodes.{{ loop.index + 1 }} = rabbit@{{ host }}
+{% endfor %}
+
+#---------------------------------------
+# Memory
+#---------------------------------------
+vm_memory_high_watermark.relative = {{ rabbitmq_vm_memory_high_watermark }}
+disk_free_limit.absolute = {{ rabbitmq_disk_free_limit }}
+
+#---------------------------------------
+# Logging
+#---------------------------------------
+log.file.level = info
+log.console = true
+log.console.level = info
+
+#---------------------------------------
+# Statistics
+#---------------------------------------
+collect_statistics_interval = 5000
+
+#---------------------------------------
+# Queue Settings
+#---------------------------------------
+queue_master_locator = min-masters
+
+#---------------------------------------
+# Management Plugin
+#---------------------------------------
+management.load_definitions = /etc/rabbitmq/definitions.json
+
+#---------------------------------------
+# Prometheus Plugin
+#---------------------------------------
+prometheus.return_per_object_metrics = true

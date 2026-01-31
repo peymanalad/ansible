@@ -1,0 +1,91 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+# 📦 ELK Stack Inventory
+# ═══════════════════════════════════════════════════════════════════════════════
+# 🎯 هدف: تعریف سرورهای Elasticsearch Cluster، Logstash و Kibana
+# ═══════════════════════════════════════════════════════════════════════════════
+
+all:
+  vars:
+    ansible_user: root
+    ansible_ssh_private_key_file: ~/.ssh/id_rsa
+    
+    # ═══ نسخه‌ها ═══
+    elk_version: "8.11.0"
+    
+    # ═══ Elasticsearch Settings ═══
+    es_cluster_name: "production-logs"
+    es_heap_size: "2g"
+    es_data_path: "/var/lib/elasticsearch"
+    es_log_path: "/var/log/elasticsearch"
+    
+    # Security
+    es_security_enabled: true
+    es_elastic_password: "CHANGE_ME_STRONG_PASSWORD"
+    es_kibana_password: "CHANGE_ME_KIBANA_PASSWORD"
+    es_logstash_password: "CHANGE_ME_LOGSTASH_PASSWORD"
+    
+    # ═══ Kibana Settings ═══
+    kibana_server_name: "kibana.example.com"
+    kibana_port: 5601
+    
+    # ═══ Logstash Settings ═══
+    logstash_heap_size: "1g"
+    
+    # ═══ SSL Settings ═══
+    ssl_enabled: true
+    ssl_certificate_path: "/etc/elasticsearch/certs"
+    
+    # ═══ Retention ═══
+    log_retention_days: 30
+
+  children:
+    #---------------------------------------
+    # گره‌های Elasticsearch
+    #---------------------------------------
+    elasticsearch:
+      hosts:
+        es-master-1:
+          ansible_host: 192.168.1.50
+          es_node_name: "es-master-1"
+          es_node_roles: ["master", "data"]
+          es_master_eligible: true
+          
+        es-master-2:
+          ansible_host: 192.168.1.51
+          es_node_name: "es-master-2"
+          es_node_roles: ["master", "data"]
+          es_master_eligible: true
+          
+        es-master-3:
+          ansible_host: 192.168.1.52
+          es_node_name: "es-master-3"
+          es_node_roles: ["master", "data"]
+          es_master_eligible: true
+
+    #---------------------------------------
+    # گره‌های Logstash
+    #---------------------------------------
+    logstash:
+      hosts:
+        logstash-1:
+          ansible_host: 192.168.1.60
+          
+        logstash-2:
+          ansible_host: 192.168.1.61
+
+    #---------------------------------------
+    # سرور Kibana
+    #---------------------------------------
+    kibana:
+      hosts:
+        kibana-1:
+          ansible_host: 192.168.1.70
+
+    #---------------------------------------
+    # همه سرورهای ELK
+    #---------------------------------------
+    elk:
+      children:
+        elasticsearch:
+        logstash:
+        kibana:

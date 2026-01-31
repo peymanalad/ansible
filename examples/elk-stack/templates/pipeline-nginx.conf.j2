@@ -1,0 +1,118 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+# Logstash Pipeline: Nginx Access & Error Logs
+# ═══════════════════════════════════════════════════════════════════════════════
+# پردازش لاگ‌های Nginx
+
+input {
+  # Nginx logs via Filebeat
+  # این input در pipeline-beats.conf تعریف شده است
+}
+
+filter {
+  if [fields][log_type] == "nginx_access" or "nginx-access" in [tags] {
+    # Parse Nginx access log (combined format)
+    grok {
+      match => {
+        "message" => '%{IPORHOST:client_ip} - %{DATA:user} \[%{HTTPDATE:timestamp}\] "%{WORD:method} %{URIPATHPARAM:request} HTTP/%{NUMBER:http_version}" %{NUMBER:response_code} %{NUMBER:bytes} "%{DATA:referrer}" "%{DATA:user_agent}"'
+      }
+    }
+    
+    # Alternative: Parse JSON format if configured
+    if "_grokparsefailure" in [tags] {
+      json {
+        source => "message"
+        target => "nginx"
+        remove_tag => ["_grokparsefailure"]
+      }
+    }
+    
+    # Parse timestamp
+    date {
+      match => [ "timestamp", "dd/MMM/yyyy:HH:mm:ss Z" ]
+      target => "@timestamp"
+    }
+    
+    # GeoIP lookup
+    if [client_ip] {
+      geoip {
+        source => "client_ip"
+        target => "geoip"
+        add_tag => ["geoip"]
+      }
+    }
+    
+    # User Agent parsing
+    if [user_agent] and [user_agent] != "-" {
+      useragent {
+        source => "user_agent"
+        target => "ua"
+      }
+    }
+    
+    # Convert response code to integer
+    mutate {
+      convert => {
+        "response_code" => "integer"
+        "bytes" => "integer"
+      }
+    }
+    
+    # Add response category
+    if [response_code] >= 200 and [response_code] < 300 {
+      mutate { add_field => { "response_category" => "success" } }
+    } else if [response_code] >= 300 and [response_code] < 400 {
+      mutate { add_field => { "response_category" => "redirect" } }
+    } else if [response_code] >= 400 and [response_code] < 500 {
+      mutate { add_field => { "response_category" => "client_error" } }
+    } else if [response_code] >= 500 {
+      mutate { add_field => { "response_category" => "server_error" } }
+    }
+    
+    # Set type
+    mutate {
+      add_field => { "[@metadata][index_prefix]" => "nginx-access" }
+    }
+  }
+  
+  if [fields][log_type] == "nginx_error" or "nginx-error" in [tags] {
+    # Parse Nginx error log
+    grok {
+      match => {
+        "message" => '(?<timestamp>\d{4}/\d{2}/\d{2} \d{2}:\d{2}:\d{2}) \[%{WORD:severity}\] %{POSINT:pid}#%{NUMBER}: %{GREEDYDATA:error_message}'
+      }
+    }
+    
+    # Parse timestamp
+    date {
+      match => [ "timestamp", "yyyy/MM/dd HH:mm:ss" ]
+      target => "@timestamp"
+    }
+    
+    # Set type
+    mutate {
+      add_field => { "[@metadata][index_prefix]" => "nginx-error" }
+    }
+  }
+}
+
+output {
+  if "nginx-access" in [tags] or [fields][log_type] == "nginx_access" {
+    elasticsearch {
+      hosts => [{% for host in groups['elasticsearch'] %}"https://{{ hostvars[host]['ansible_host'] }}:9200"{% if not loop.last %}, {% endif %}{% endfor %}]
+      user => "elastic"
+      password => "{{ es_elastic_password }}"
+      ssl_certificate_verification => false
+      index => "nginx-access-%{+YYYY.MM.dd}"
+    }
+  }
+  
+  if "nginx-error" in [tags] or [fields][log_type] == "nginx_error" {
+    elasticsearch {
+      hosts => [{% for host in groups['elasticsearch'] %}"https://{{ hostvars[host]['ansible_host'] }}:9200"{% if not loop.last %}, {% endif %}{% endfor %}]
+      user => "elastic"
+      password => "{{ es_elastic_password }}"
+      ssl_certificate_verification => false
+      index => "nginx-error-%{+YYYY.MM.dd}"
+    }
+  }
+}

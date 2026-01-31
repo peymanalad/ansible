@@ -1,0 +1,16 @@
+---
+# Nginx Handlers
+
+- name: Reload nginx
+  systemd:
+    name: "{{ nginx_service_name }}"
+    state: reloaded
+
+- name: Restart nginx
+  systemd:
+    name: "{{ nginx_service_name }}"
+    state: restarted
+
+- name: Validate nginx config
+  command: nginx -t
+  changed_when: false

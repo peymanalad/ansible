@@ -1,0 +1,33 @@
+---
+# Install Nginx
+
+- name: Update apt cache
+  apt:
+    update_cache: yes
+    cache_valid_time: 3600
+  when: ansible_os_family == "Debian"
+
+- name: Install Nginx package
+  package:
+    name: "{{ nginx_package_name }}"
+    state: "{{ nginx_package_state }}"
+
+- name: Ensure nginx directories exist
+  file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+  loop:
+    - "{{ nginx_sites_available }}"
+    - "{{ nginx_sites_enabled }}"
+    - "{{ nginx_snippets_dir }}"
+    - "{{ nginx_log_dir }}"
+
+- name: Generate DH parameters
+  command: openssl dhparam -out {{ nginx_dhparam_path }} {{ nginx_dhparam_size }}
+  args:
+    creates: "{{ nginx_dhparam_path }}"
+  when: nginx_generate_dhparam | bool
+  notify: Reload nginx

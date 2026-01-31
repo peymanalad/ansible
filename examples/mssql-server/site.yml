@@ -1,0 +1,324 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+# 📦 Microsoft SQL Server Installation Playbook
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# 🎯 هدف:
+#    نصب و پیکربندی کامل SQL Server 2022 روی Linux
+#
+# ✅ مراحل:
+#    1. نصب SQL Server Engine
+#    2. تنظیم SA password
+#    3. نصب command-line tools
+#    4. ساخت databases و users
+#    5. تنظیم backup
+#
+# ═══════════════════════════════════════════════════════════════════════════════
+
+---
+- name: Install and Configure Microsoft SQL Server
+  hosts: all
+  become: yes
+  
+  tasks:
+    #=========================================
+    # 1. Prerequisites
+    #=========================================
+    - name: Check minimum memory requirement
+      assert:
+        that:
+          - ansible_memtotal_mb >= 2000
+        fail_msg: "SQL Server requires at least 2GB RAM. Current: {{ ansible_memtotal_mb }}MB"
+      tags: prereq
+
+    - name: Install required packages
+      apt:
+        name:
+          - curl
+          - gnupg2
+          - software-properties-common
+        state: present
+        update_cache: yes
+      when: ansible_os_family == "Debian"
+      tags: prereq
+
+    #=========================================
+    # 2. Add Microsoft Repository
+    #=========================================
+    - name: Add Microsoft GPG key (Ubuntu)
+      apt_key:
+        url: https://packages.microsoft.com/keys/microsoft.asc
+        state: present
+      when: ansible_os_family == "Debian"
+      tags: install
+
+    - name: Add SQL Server repository (Ubuntu)
+      apt_repository:
+        repo: "deb [arch=amd64] https://packages.microsoft.com/ubuntu/{{ ansible_distribution_version }}/mssql-server-{{ mssql_version }} {{ ansible_distribution_release }} main"
+        state: present
+        filename: mssql-server
+      when: ansible_os_family == "Debian"
+      tags: install
+
+    - name: Add SQL Server tools repository (Ubuntu)
+      apt_repository:
+        repo: "deb [arch=amd64] https://packages.microsoft.com/ubuntu/{{ ansible_distribution_version }}/prod {{ ansible_distribution_release }} main"
+        state: present
+        filename: mssql-tools
+      when: ansible_os_family == "Debian"
+      tags: install
+
+    #=========================================
+    # 3. Install SQL Server
+    #=========================================
+    - name: Install SQL Server
+      apt:
+        name: mssql-server
+        state: present
+        update_cache: yes
+      when: ansible_os_family == "Debian"
+      tags: install
+
+    - name: Run SQL Server setup
+      command: /opt/mssql/bin/mssql-conf setup
+      environment:
+        ACCEPT_EULA: "Y"
+        MSSQL_SA_PASSWORD: "{{ mssql_sa_password }}"
+        MSSQL_PID: "{{ mssql_edition }}"
+      args:
+        creates: /var/opt/mssql/.system/system_key
+      no_log: true
+      tags: install
+
+    - name: Start and enable SQL Server
+      systemd:
+        name: mssql-server
+        state: started
+        enabled: yes
+      tags: install
+
+    #=========================================
+    # 4. Install SQL Server Tools
+    #=========================================
+    - name: Accept EULA for tools
+      debconf:
+        name: mssql-tools
+        question: "{{ item }}"
+        value: "true"
+        vtype: boolean
+      loop:
+        - mssql-tools/accept_eula
+        - msodbcsql17/accept_eula
+      when: ansible_os_family == "Debian"
+      tags: tools
+
+    - name: Install SQL Server command-line tools
+      apt:
+        name:
+          - mssql-tools
+          - unixodbc-dev
+        state: present
+      environment:
+        ACCEPT_EULA: "Y"
+      when: ansible_os_family == "Debian"
+      tags: tools
+
+    - name: Add sqlcmd to PATH
+      copy:
+        dest: /etc/profile.d/mssql-tools.sh
+        content: |
+          export PATH="$PATH:/opt/mssql-tools/bin"
+        mode: '0644'
+      tags: tools
+
+    #=========================================
+    # 5. Configure SQL Server
+    #=========================================
+    - name: Set TCP port
+      command: /opt/mssql/bin/mssql-conf set network.tcpport {{ mssql_tcp_port }}
+      notify: Restart SQL Server
+      tags: config
+
+    - name: Set memory limit
+      command: /opt/mssql/bin/mssql-conf set memory.memorylimitmb {{ mssql_memory_limit_mb }}
+      notify: Restart SQL Server
+      tags: config
+
+    - name: Enable SQL Server Agent
+      command: /opt/mssql/bin/mssql-conf set sqlagent.enabled true
+      when: mssql_agent_enabled
+      notify: Restart SQL Server
+      tags: config
+
+    - name: Set default data directory
+      command: /opt/mssql/bin/mssql-conf set filelocation.defaultdatadir {{ mssql_data_dir }}
+      notify: Restart SQL Server
+      tags: config
+
+    - name: Set default log directory
+      command: /opt/mssql/bin/mssql-conf set filelocation.defaultlogdir {{ mssql_log_dir }}
+      notify: Restart SQL Server
+      tags: config
+
+    - name: Set default backup directory
+      command: /opt/mssql/bin/mssql-conf set filelocation.defaultbackupdir {{ mssql_backup_dir }}
+      notify: Restart SQL Server
+      tags: config
+
+    #=========================================
+    # 6. Create Databases and Users
+    #=========================================
+    - name: Create backup directory
+      file:
+        path: "{{ mssql_backup_dir }}"
+        state: directory
+        owner: mssql
+        group: mssql
+        mode: '0755'
+      tags: databases
+
+    - name: Wait for SQL Server to be ready
+      wait_for:
+        port: "{{ mssql_tcp_port }}"
+        delay: 5
+        timeout: 60
+      tags: databases
+
+    - name: Create databases
+      command: >
+        /opt/mssql-tools/bin/sqlcmd -S localhost,{{ mssql_tcp_port }}
+        -U SA -P "{{ mssql_sa_password }}"
+        -Q "IF NOT EXISTS (SELECT * FROM sys.databases WHERE name = '{{ item.name }}') CREATE DATABASE [{{ item.name }}]"
+      loop: "{{ mssql_databases }}"
+      no_log: true
+      tags: databases
+
+    - name: Create SQL logins
+      command: >
+        /opt/mssql-tools/bin/sqlcmd -S localhost,{{ mssql_tcp_port }}
+        -U SA -P "{{ mssql_sa_password }}"
+        -Q "IF NOT EXISTS (SELECT * FROM sys.server_principals WHERE name = '{{ item.name }}') CREATE LOGIN [{{ item.name }}] WITH PASSWORD = '{{ item.password }}', DEFAULT_DATABASE = [{{ item.default_db }}]"
+      loop: "{{ mssql_users }}"
+      no_log: true
+      tags: databases
+
+    - name: Create database users and assign roles
+      command: >
+        /opt/mssql-tools/bin/sqlcmd -S localhost,{{ mssql_tcp_port }}
+        -U SA -P "{{ mssql_sa_password }}"
+        -d "{{ item.default_db }}"
+        -Q "IF NOT EXISTS (SELECT * FROM sys.database_principals WHERE name = '{{ item.name }}') BEGIN CREATE USER [{{ item.name }}] FOR LOGIN [{{ item.name }}]; {% for role in item.roles %}ALTER ROLE {{ role }} ADD MEMBER [{{ item.name }}]; {% endfor %} END"
+      loop: "{{ mssql_users }}"
+      no_log: true
+      tags: databases
+
+    #=========================================
+    # 7. Setup Backup
+    #=========================================
+    - name: Create backup script
+      copy:
+        dest: /usr/local/bin/mssql_backup.sh
+        mode: '0755'
+        content: |
+          #!/bin/bash
+          # ═══════════════════════════════════════════════════════════
+          # SQL Server Backup Script
+          # Generated by Ansible
+          # ═══════════════════════════════════════════════════════════
+          
+          BACKUP_DIR="{{ mssql_backup_dir }}"
+          DATE=$(date +%Y%m%d_%H%M%S)
+          SA_PASSWORD="{{ mssql_sa_password }}"
+          RETENTION_DAYS={{ mssql_backup_retention_days }}
+          LOG_FILE="${BACKUP_DIR}/backup.log"
+          
+          echo "========================================" >> $LOG_FILE
+          echo "Backup started: $(date)" >> $LOG_FILE
+          
+          {% for db in mssql_databases %}
+          echo "Backing up {{ db.name }}..." >> $LOG_FILE
+          /opt/mssql-tools/bin/sqlcmd -S localhost,{{ mssql_tcp_port }} -U SA -P "$SA_PASSWORD" \
+              -Q "BACKUP DATABASE [{{ db.name }}] TO DISK = '${BACKUP_DIR}/{{ db.name }}_${DATE}.bak' WITH FORMAT, COMPRESSION"
+          
+          if [ $? -eq 0 ]; then
+              echo "✅ {{ db.name }} backup successful" >> $LOG_FILE
+          else
+              echo "❌ {{ db.name }} backup FAILED" >> $LOG_FILE
+          fi
+          {% endfor %}
+          
+          # Cleanup old backups
+          find ${BACKUP_DIR} -name "*.bak" -mtime +${RETENTION_DAYS} -delete
+          
+          echo "Backup completed: $(date)" >> $LOG_FILE
+      when: mssql_backup_enabled
+      no_log: true
+      tags: backup
+
+    - name: Setup backup cron job
+      cron:
+        name: "SQL Server backup"
+        minute: "0"
+        hour: "3"
+        job: "/usr/local/bin/mssql_backup.sh"
+      when: mssql_backup_enabled
+      tags: backup
+
+    #=========================================
+    # 8. Firewall
+    #=========================================
+    - name: Allow SQL Server port
+      ufw:
+        rule: allow
+        port: "{{ mssql_tcp_port }}"
+        proto: tcp
+      when: ansible_facts.packages['ufw'] is defined
+      tags: firewall
+
+    #=========================================
+    # 9. Display Status
+    #=========================================
+    - name: Check SQL Server version
+      command: >
+        /opt/mssql-tools/bin/sqlcmd -S localhost,{{ mssql_tcp_port }}
+        -U SA -P "{{ mssql_sa_password }}"
+        -Q "SELECT @@VERSION"
+      register: sql_version
+      no_log: true
+      changed_when: false
+      tags: status
+
+    - name: Display summary
+      debug:
+        msg: |
+          ╔════════════════════════════════════════════════════════════════╗
+          ║              🗄️  SQL Server Setup Complete!                     ║
+          ╠════════════════════════════════════════════════════════════════╣
+          ║  Edition: {{ mssql_edition }}
+          ║  Port: {{ mssql_tcp_port }}
+          ║  Memory Limit: {{ mssql_memory_limit_mb }}MB
+          ║  Agent: {{ 'Enabled' if mssql_agent_enabled else 'Disabled' }}
+          ║                                                                ║
+          ║  Databases:                                                    ║
+          {% for db in mssql_databases %}
+          ║    - {{ db.name }}
+          {% endfor %}
+          ║                                                                ║
+          ║  Users:                                                        ║
+          {% for user in mssql_users %}
+          ║    - {{ user.name }} ({{ user.roles | join(', ') }})
+          {% endfor %}
+          ║                                                                ║
+          ║  Connection String:                                            ║
+          ║    Server={{ ansible_host }},{{ mssql_tcp_port }};Database=MyAppDB;User Id=user;Password=pass
+          ║                                                                ║
+          ║  Test connection:                                              ║
+          ║    sqlcmd -S {{ ansible_host }},{{ mssql_tcp_port }} -U SA -P 'password'
+          ║                                                                ║
+          ╚════════════════════════════════════════════════════════════════╝
+      tags: status
+
+  handlers:
+    - name: Restart SQL Server
+      systemd:
+        name: mssql-server
+        state: restarted

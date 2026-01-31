@@ -1,0 +1,69 @@
+---
+# User Management Playbook
+# مدیریت کاربران و SSH Keys
+
+all:
+  children:
+    servers:
+      hosts:
+        web-1:
+          ansible_host: 192.168.1.10
+        web-2:
+          ansible_host: 192.168.1.11
+        db-1:
+          ansible_host: 192.168.1.20
+  
+  vars:
+    # Admin users with sudo access
+    admin_users:
+      - username: admin
+        full_name: "System Administrator"
+        ssh_keys:
+          - "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIHv... admin@company.com"
+        groups:
+          - sudo
+          - adm
+        shell: /bin/bash
+      
+      - username: devops
+        full_name: "DevOps Engineer"
+        ssh_keys:
+          - "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIG... devops@company.com"
+        groups:
+          - sudo
+          - docker
+        shell: /bin/bash
+    
+    # Regular users (no sudo)
+    regular_users:
+      - username: developer1
+        full_name: "Ali Developer"
+        ssh_keys:
+          - "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKv... dev1@company.com"
+        groups:
+          - developers
+        shell: /bin/bash
+      
+      - username: developer2
+        full_name: "Sara Developer"
+        ssh_keys:
+          - "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMv... dev2@company.com"
+        groups:
+          - developers
+        shell: /bin/bash
+    
+    # Service accounts (no login)
+    service_accounts:
+      - username: deploy
+        full_name: "Deployment Service"
+        ssh_keys:
+          - "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDv... deploy@ci-cd.local"
+        groups:
+          - www-data
+        shell: /usr/sbin/nologin
+        home: /opt/deploy
+    
+    # Users to remove
+    removed_users:
+      - oldadmin
+      - tempuser

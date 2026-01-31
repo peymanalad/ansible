@@ -1,0 +1,491 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+# 📦 Oracle Database 19c Installation Playbook
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# 🎯 هدف:
+#    نصب و پیکربندی Oracle Database 19c روی Oracle Linux یا RHEL
+#    این Playbook مراحل Silent Installation را انجام می‌دهد
+#
+# ⚠️ پیش‌نیازها:
+#    1. دانلود Oracle Database Software از Oracle.com
+#    2. قرار دادن فایل ZIP در /tmp/oracle_install/
+#    3. حداقل 8GB RAM و 50GB Disk
+#    4. Oracle Linux 7/8 یا RHEL 7/8
+#
+# ✅ کارهایی که انجام می‌شود:
+#    1. نصب پیش‌نیازها و kernel parameters
+#    2. ساخت کاربران و گروه‌های Oracle
+#    3. ایجاد دایرکتوری‌ها و تنظیم permissions
+#    4. نصب Oracle Database با Response File
+#    5. ساخت Listener
+#    6. ایجاد Container Database (CDB) و Pluggable Database (PDB)
+#    7. تنظیمات پس از نصب
+#
+# 📋 نحوه اجرا:
+#    ansible-playbook -i inventory.yml site.yml
+#    ansible-playbook -i inventory.yml site.yml --tags prereq
+#    ansible-playbook -i inventory.yml site.yml --tags install
+#    ansible-playbook -i inventory.yml site.yml --tags createdb
+#
+# 📊 Tags موجود:
+#    - prereq: نصب پیش‌نیازها
+#    - install: نصب Oracle Software
+#    - createdb: ایجاد Database
+#    - listener: تنظیم Listener
+#    - postinstall: تنظیمات پس از نصب
+#
+# ═══════════════════════════════════════════════════════════════════════════════
+
+---
+# ═══════════════════════════════════════════════════════════════════════════════
+# نصب پیش‌نیازها
+# ═══════════════════════════════════════════════════════════════════════════════
+- name: نصب پیش‌نیازهای Oracle Database
+  hosts: oracle_db
+  become: yes
+  tags: [prereq]
+  
+  tasks:
+    #---------------------------------------------------------------------------
+    # بررسی سیستم‌عامل
+    #---------------------------------------------------------------------------
+    - name: بررسی نوع سیستم‌عامل
+      assert:
+        that:
+          - ansible_os_family == 'RedHat'
+          - ansible_distribution_major_version | int >= 7
+        fail_msg: "این Playbook فقط از Oracle Linux/RHEL 7/8 پشتیبانی می‌کند"
+
+    #---------------------------------------------------------------------------
+    # نصب پکیج‌های پیش‌نیاز
+    #---------------------------------------------------------------------------
+    - name: نصب Oracle preinstall package (Oracle Linux)
+      yum:
+        name: oracle-database-preinstall-19c
+        state: present
+      when: ansible_distribution == 'OracleLinux'
+
+    - name: نصب پکیج‌های پیش‌نیاز (RHEL)
+      yum:
+        name:
+          - bc
+          - binutils
+          - compat-libcap1
+          - compat-libstdc++-33
+          - elfutils-libelf
+          - elfutils-libelf-devel
+          - fontconfig-devel
+          - glibc
+          - glibc-devel
+          - ksh
+          - libaio
+          - libaio-devel
+          - libX11
+          - libXau
+          - libXi
+          - libXtst
+          - libXrender
+          - libXrender-devel
+          - libgcc
+          - libstdc++
+          - libstdc++-devel
+          - libxcb
+          - make
+          - net-tools
+          - nfs-utils
+          - python3
+          - python3-configshell
+          - python3-rtslib
+          - smartmontools
+          - sysstat
+          - targetcli
+          - unixODBC
+        state: present
+      when: ansible_distribution != 'OracleLinux'
+
+    #---------------------------------------------------------------------------
+    # تنظیمات Kernel
+    #---------------------------------------------------------------------------
+    - name: تنظیم kernel parameters
+      sysctl:
+        name: "{{ item.name }}"
+        value: "{{ item.value }}"
+        state: present
+        reload: yes
+        sysctl_file: /etc/sysctl.d/98-oracle.conf
+      loop:
+        - { name: 'fs.file-max', value: '6815744' }
+        - { name: 'kernel.sem', value: '250 32000 100 128' }
+        - { name: 'kernel.shmmni', value: '4096' }
+        - { name: 'kernel.shmall', value: '1073741824' }
+        - { name: 'kernel.shmmax', value: '4398046511104' }
+        - { name: 'kernel.panic_on_oops', value: '1' }
+        - { name: 'net.core.rmem_default', value: '262144' }
+        - { name: 'net.core.rmem_max', value: '4194304' }
+        - { name: 'net.core.wmem_default', value: '262144' }
+        - { name: 'net.core.wmem_max', value: '1048576' }
+        - { name: 'net.ipv4.conf.all.rp_filter', value: '2' }
+        - { name: 'net.ipv4.conf.default.rp_filter', value: '2' }
+        - { name: 'fs.aio-max-nr', value: '1048576' }
+        - { name: 'net.ipv4.ip_local_port_range', value: '9000 65500' }
+
+    #---------------------------------------------------------------------------
+    # تنظیمات Limits
+    #---------------------------------------------------------------------------
+    - name: تنظیم ulimits برای oracle user
+      pam_limits:
+        domain: oracle
+        limit_type: "{{ item.type }}"
+        limit_item: "{{ item.item }}"
+        value: "{{ item.value }}"
+      loop:
+        - { type: soft, item: nofile, value: 1024 }
+        - { type: hard, item: nofile, value: 65536 }
+        - { type: soft, item: nproc, value: 16384 }
+        - { type: hard, item: nproc, value: 16384 }
+        - { type: soft, item: stack, value: 10240 }
+        - { type: hard, item: stack, value: 32768 }
+        - { type: soft, item: memlock, value: 134217728 }
+        - { type: hard, item: memlock, value: 134217728 }
+
+    #---------------------------------------------------------------------------
+    # ساخت گروه‌ها
+    #---------------------------------------------------------------------------
+    - name: ساخت گروه‌های Oracle
+      group:
+        name: "{{ item.name }}"
+        gid: "{{ item.gid }}"
+        state: present
+      loop:
+        - { name: 'oinstall', gid: 54321 }
+        - { name: 'dba', gid: 54322 }
+        - { name: 'oper', gid: 54323 }
+        - { name: 'backupdba', gid: 54324 }
+        - { name: 'dgdba', gid: 54325 }
+        - { name: 'kmdba', gid: 54326 }
+        - { name: 'racdba', gid: 54330 }
+
+    #---------------------------------------------------------------------------
+    # ساخت کاربر Oracle
+    #---------------------------------------------------------------------------
+    - name: ساخت کاربر oracle
+      user:
+        name: oracle
+        uid: 54321
+        group: oinstall
+        groups: dba,oper,backupdba,dgdba,kmdba,racdba
+        home: /home/oracle
+        shell: /bin/bash
+        password: "{{ 'oracle' | password_hash('sha512') }}"
+
+    #---------------------------------------------------------------------------
+    # ساخت دایرکتوری‌ها
+    #---------------------------------------------------------------------------
+    - name: ساخت دایرکتوری‌های Oracle
+      file:
+        path: "{{ item }}"
+        state: directory
+        owner: oracle
+        group: oinstall
+        mode: '0775'
+      loop:
+        - "{{ oracle_base }}"
+        - "{{ oracle_home }}"
+        - "{{ oracle_inventory }}"
+        - "{{ oracle_data_path }}"
+        - "{{ oracle_fra_path }}"
+        - "/tmp/oracle_install"
+
+    #---------------------------------------------------------------------------
+    # غیرفعال کردن Firewall (یا اضافه کردن Rules)
+    #---------------------------------------------------------------------------
+    - name: اضافه کردن firewall rules
+      firewalld:
+        port: "{{ item }}"
+        permanent: yes
+        state: enabled
+      loop:
+        - "{{ oracle_listener_port }}/tcp"
+        - "{{ oracle_em_port }}/tcp"
+      notify: reload firewall
+      ignore_errors: yes
+
+    #---------------------------------------------------------------------------
+    # غیرفعال کردن SELinux (یا تنظیم permissive)
+    #---------------------------------------------------------------------------
+    - name: تنظیم SELinux به permissive
+      selinux:
+        policy: targeted
+        state: permissive
+      ignore_errors: yes
+
+    #---------------------------------------------------------------------------
+    # تنظیم /etc/hosts
+    #---------------------------------------------------------------------------
+    - name: اضافه کردن hostname به /etc/hosts
+      lineinfile:
+        path: /etc/hosts
+        line: "{{ ansible_host }} {{ ansible_hostname }} {{ ansible_fqdn }}"
+        state: present
+
+  handlers:
+    - name: reload firewall
+      firewalld:
+        state: reloaded
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# نصب Oracle Database Software
+# ═══════════════════════════════════════════════════════════════════════════════
+- name: نصب Oracle Database Software
+  hosts: oracle_db
+  become: yes
+  become_user: oracle
+  tags: [install]
+  
+  tasks:
+    #---------------------------------------------------------------------------
+    # تنظیم Environment Variables
+    #---------------------------------------------------------------------------
+    - name: تنظیم Oracle environment
+      blockinfile:
+        path: /home/oracle/.bash_profile
+        block: |
+          # Oracle Settings
+          export ORACLE_BASE={{ oracle_base }}
+          export ORACLE_HOME={{ oracle_home }}
+          export ORACLE_SID={{ oracle_sid }}
+          export PATH=$ORACLE_HOME/bin:$PATH
+          export LD_LIBRARY_PATH=$ORACLE_HOME/lib:$LD_LIBRARY_PATH
+          export TNS_ADMIN=$ORACLE_HOME/network/admin
+          export NLS_LANG=AMERICAN_AMERICA.{{ oracle_charset }}
+        marker: "# {mark} ANSIBLE MANAGED ORACLE ENV"
+
+    #---------------------------------------------------------------------------
+    # استخراج فایل نصب
+    #---------------------------------------------------------------------------
+    - name: استخراج Oracle Database Software
+      unarchive:
+        src: /tmp/oracle_install/LINUX.X64_193000_db_home.zip
+        dest: "{{ oracle_home }}"
+        remote_src: yes
+        creates: "{{ oracle_home }}/runInstaller"
+
+    #---------------------------------------------------------------------------
+    # ساخت Response File
+    #---------------------------------------------------------------------------
+    - name: ساخت Response File برای نصب
+      template:
+        src: templates/db_install.rsp.j2
+        dest: /tmp/oracle_install/db_install.rsp
+        owner: oracle
+        group: oinstall
+        mode: '0640'
+
+    #---------------------------------------------------------------------------
+    # نصب Oracle با Silent Mode
+    #---------------------------------------------------------------------------
+    - name: نصب Oracle Database Software
+      shell: |
+        source /home/oracle/.bash_profile
+        {{ oracle_home }}/runInstaller -silent -waitforcompletion \
+          -responseFile /tmp/oracle_install/db_install.rsp
+      args:
+        creates: "{{ oracle_home }}/bin/sqlplus"
+      register: oracle_install
+      failed_when: 
+        - oracle_install.rc not in [0, 6]
+
+    #---------------------------------------------------------------------------
+    # اجرای root scripts
+    #---------------------------------------------------------------------------
+    - name: اجرای orainstRoot.sh
+      shell: "{{ oracle_inventory }}/orainstRoot.sh"
+      become: yes
+      become_user: root
+
+    - name: اجرای root.sh
+      shell: "{{ oracle_home }}/root.sh"
+      become: yes
+      become_user: root
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ساخت Listener
+# ═══════════════════════════════════════════════════════════════════════════════
+- name: ساخت و کانفیگ Listener
+  hosts: oracle_db
+  become: yes
+  become_user: oracle
+  tags: [listener]
+  
+  tasks:
+    #---------------------------------------------------------------------------
+    # ساخت Response File برای Listener
+    #---------------------------------------------------------------------------
+    - name: ساخت netca response file
+      template:
+        src: templates/netca.rsp.j2
+        dest: /tmp/oracle_install/netca.rsp
+        owner: oracle
+        group: oinstall
+        mode: '0640'
+
+    #---------------------------------------------------------------------------
+    # ساخت Listener
+    #---------------------------------------------------------------------------
+    - name: ساخت Listener با netca
+      shell: |
+        source /home/oracle/.bash_profile
+        {{ oracle_home }}/bin/netca -silent -responseFile /tmp/oracle_install/netca.rsp
+      args:
+        creates: "{{ oracle_home }}/network/admin/listener.ora"
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ایجاد Database
+# ═══════════════════════════════════════════════════════════════════════════════
+- name: ایجاد Oracle Database
+  hosts: oracle_primary
+  become: yes
+  become_user: oracle
+  tags: [createdb]
+  
+  tasks:
+    #---------------------------------------------------------------------------
+    # ساخت Response File برای DBCA
+    #---------------------------------------------------------------------------
+    - name: ساخت dbca response file
+      template:
+        src: templates/dbca.rsp.j2
+        dest: /tmp/oracle_install/dbca.rsp
+        owner: oracle
+        group: oinstall
+        mode: '0640'
+
+    #---------------------------------------------------------------------------
+    # ایجاد Database
+    #---------------------------------------------------------------------------
+    - name: ایجاد Database با DBCA
+      shell: |
+        source /home/oracle/.bash_profile
+        {{ oracle_home }}/bin/dbca -silent -createDatabase \
+          -responseFile /tmp/oracle_install/dbca.rsp
+      args:
+        creates: "{{ oracle_data_path }}/{{ oracle_sid | upper }}/system01.dbf"
+      register: dbca_output
+      async: 3600  # یک ساعت timeout
+      poll: 60
+
+    #---------------------------------------------------------------------------
+    # تنظیم Auto Start
+    #---------------------------------------------------------------------------
+    - name: تنظیم Oracle برای Auto Start
+      lineinfile:
+        path: /etc/oratab
+        regexp: "^{{ oracle_sid }}:"
+        line: "{{ oracle_sid }}:{{ oracle_home }}:Y"
+      become: yes
+      become_user: root
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# تنظیمات پس از نصب
+# ═══════════════════════════════════════════════════════════════════════════════
+- name: تنظیمات پس از نصب
+  hosts: oracle_db
+  become: yes
+  tags: [postinstall]
+  
+  tasks:
+    #---------------------------------------------------------------------------
+    # ساخت Systemd Service
+    #---------------------------------------------------------------------------
+    - name: ساخت Oracle systemd service
+      template:
+        src: templates/oracle.service.j2
+        dest: /etc/systemd/system/oracle.service
+        owner: root
+        group: root
+        mode: '0644'
+      notify: enable oracle service
+
+    #---------------------------------------------------------------------------
+    # ساخت اسکریپت‌های مدیریتی
+    #---------------------------------------------------------------------------
+    - name: ساخت اسکریپت start_oracle.sh
+      copy:
+        dest: /home/oracle/scripts/start_oracle.sh
+        content: |
+          #!/bin/bash
+          source /home/oracle/.bash_profile
+          
+          echo "Starting Oracle Listener..."
+          lsnrctl start
+          
+          echo "Starting Oracle Database..."
+          sqlplus / as sysdba <<EOF
+          startup
+          alter pluggable database all open;
+          exit
+          EOF
+          
+          echo "Oracle Database started successfully."
+        owner: oracle
+        group: oinstall
+        mode: '0755'
+
+    - name: ساخت اسکریپت stop_oracle.sh
+      copy:
+        dest: /home/oracle/scripts/stop_oracle.sh
+        content: |
+          #!/bin/bash
+          source /home/oracle/.bash_profile
+          
+          echo "Stopping Oracle Database..."
+          sqlplus / as sysdba <<EOF
+          shutdown immediate
+          exit
+          EOF
+          
+          echo "Stopping Oracle Listener..."
+          lsnrctl stop
+          
+          echo "Oracle Database stopped successfully."
+        owner: oracle
+        group: oinstall
+        mode: '0755'
+
+    #---------------------------------------------------------------------------
+    # نمایش اطلاعات نهایی
+    #---------------------------------------------------------------------------
+    - name: نمایش اطلاعات دسترسی
+      debug:
+        msg: |
+          ═══════════════════════════════════════════════════════════════════
+          ✅ Oracle Database با موفقیت نصب شد!
+          ═══════════════════════════════════════════════════════════════════
+          
+          🗄️ Database SID: {{ oracle_sid }}
+          📦 PDB Name: {{ oracle_pdb_name }}
+          
+          🔌 Connection String:
+             - CDB: {{ ansible_host }}:{{ oracle_listener_port }}/{{ oracle_sid }}
+             - PDB: {{ ansible_host }}:{{ oracle_listener_port }}/{{ oracle_pdb_name }}
+          
+          🔐 کاربران:
+             - SYS (as SYSDBA)
+             - SYSTEM
+             - PDBADMIN (در PDB)
+          
+          📊 Enterprise Manager:
+             https://{{ ansible_host }}:{{ oracle_em_port }}/em
+          
+          ═══════════════════════════════════════════════════════════════════
+
+  handlers:
+    - name: enable oracle service
+      systemd:
+        name: oracle
+        enabled: yes
+        daemon_reload: yes

@@ -1,0 +1,308 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+# 📦 Mattermost Installation Playbook
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# 🎯 هدف:
+#    نصب Mattermost با PostgreSQL و Nginx reverse proxy
+#
+# ═══════════════════════════════════════════════════════════════════════════════
+
+---
+- name: Install and Configure Mattermost
+  hosts: all
+  become: yes
+  
+  tasks:
+    #=========================================
+    # 1. Install Prerequisites
+    #=========================================
+    - name: Install required packages
+      apt:
+        name:
+          - postgresql
+          - postgresql-contrib
+          - python3-psycopg2
+          - nginx
+          - certbot
+          - python3-certbot-nginx
+        state: present
+        update_cache: yes
+      tags: prereq
+
+    #=========================================
+    # 2. Setup PostgreSQL
+    #=========================================
+    - name: Start PostgreSQL
+      systemd:
+        name: postgresql
+        state: started
+        enabled: yes
+      tags: database
+
+    - name: Create Mattermost database user
+      become_user: postgres
+      postgresql_user:
+        name: "{{ mattermost_db_user }}"
+        password: "{{ mattermost_db_password }}"
+        state: present
+      no_log: true
+      tags: database
+
+    - name: Create Mattermost database
+      become_user: postgres
+      postgresql_db:
+        name: "{{ mattermost_db_name }}"
+        owner: "{{ mattermost_db_user }}"
+        encoding: UTF8
+        state: present
+      tags: database
+
+    - name: Grant database privileges
+      become_user: postgres
+      postgresql_privs:
+        db: "{{ mattermost_db_name }}"
+        role: "{{ mattermost_db_user }}"
+        type: database
+        privs: ALL
+      tags: database
+
+    #=========================================
+    # 3. Create Mattermost User
+    #=========================================
+    - name: Create mattermost group
+      group:
+        name: "{{ mattermost_group }}"
+        state: present
+      tags: setup
+
+    - name: Create mattermost user
+      user:
+        name: "{{ mattermost_user }}"
+        group: "{{ mattermost_group }}"
+        shell: /sbin/nologin
+        home: "{{ mattermost_install_dir }}"
+        create_home: no
+        system: yes
+      tags: setup
+
+    #=========================================
+    # 4. Download and Install Mattermost
+    #=========================================
+    - name: Download Mattermost
+      get_url:
+        url: "https://releases.mattermost.com/{{ mattermost_version }}/mattermost-{{ mattermost_version }}-linux-amd64.tar.gz"
+        dest: /tmp/mattermost.tar.gz
+        mode: '0644'
+      tags: install
+
+    - name: Extract Mattermost
+      unarchive:
+        src: /tmp/mattermost.tar.gz
+        dest: /opt
+        remote_src: yes
+        creates: "{{ mattermost_install_dir }}/bin/mattermost"
+      tags: install
+
+    - name: Create data directory
+      file:
+        path: "{{ mattermost_data_dir }}"
+        state: directory
+        owner: "{{ mattermost_user }}"
+        group: "{{ mattermost_group }}"
+        mode: '0755'
+      tags: install
+
+    - name: Set ownership
+      file:
+        path: "{{ mattermost_install_dir }}"
+        owner: "{{ mattermost_user }}"
+        group: "{{ mattermost_group }}"
+        recurse: yes
+      tags: install
+
+    #=========================================
+    # 5. Configure Mattermost
+    #=========================================
+    - name: Configure Mattermost
+      template:
+        src: templates/config.json.j2
+        dest: "{{ mattermost_install_dir }}/config/config.json"
+        owner: "{{ mattermost_user }}"
+        group: "{{ mattermost_group }}"
+        mode: '0600'
+      notify: Restart Mattermost
+      tags: config
+
+    #=========================================
+    # 6. Create Systemd Service
+    #=========================================
+    - name: Create systemd service
+      copy:
+        dest: /etc/systemd/system/mattermost.service
+        content: |
+          [Unit]
+          Description=Mattermost
+          After=network.target postgresql.service
+          Requires=postgresql.service
+          
+          [Service]
+          Type=notify
+          ExecStart={{ mattermost_install_dir }}/bin/mattermost
+          TimeoutStartSec=3600
+          KillMode=mixed
+          Restart=always
+          RestartSec=10
+          WorkingDirectory={{ mattermost_install_dir }}
+          User={{ mattermost_user }}
+          Group={{ mattermost_group }}
+          LimitNOFILE=49152
+          
+          [Install]
+          WantedBy=multi-user.target
+        mode: '0644'
+      notify: Restart Mattermost
+      tags: service
+
+    - name: Start and enable Mattermost
+      systemd:
+        name: mattermost
+        state: started
+        enabled: yes
+        daemon_reload: yes
+      tags: service
+
+    - name: Wait for Mattermost to start
+      wait_for:
+        port: 8065
+        delay: 5
+        timeout: 60
+      tags: service
+
+    #=========================================
+    # 7. Configure Nginx
+    #=========================================
+    - name: Configure Nginx site
+      template:
+        src: templates/nginx-mattermost.conf.j2
+        dest: /etc/nginx/sites-available/mattermost
+        mode: '0644'
+      notify: Reload Nginx
+      tags: nginx
+
+    - name: Enable Nginx site
+      file:
+        src: /etc/nginx/sites-available/mattermost
+        dest: /etc/nginx/sites-enabled/mattermost
+        state: link
+      notify: Reload Nginx
+      tags: nginx
+
+    - name: Remove default site
+      file:
+        path: /etc/nginx/sites-enabled/default
+        state: absent
+      notify: Reload Nginx
+      tags: nginx
+
+    - name: Start Nginx
+      systemd:
+        name: nginx
+        state: started
+        enabled: yes
+      tags: nginx
+
+    #=========================================
+    # 8. SSL Certificate
+    #=========================================
+    - name: Obtain SSL certificate
+      command: >
+        certbot --nginx -d {{ mattermost_domain }}
+        --non-interactive --agree-tos
+        --email {{ ssl_email }}
+        --redirect
+      when: ssl_enabled
+      register: certbot_result
+      changed_when: "'Successfully' in certbot_result.stdout"
+      tags: ssl
+
+    #=========================================
+    # 9. Backup Setup
+    #=========================================
+    - name: Create backup script
+      copy:
+        dest: /usr/local/bin/mattermost_backup.sh
+        mode: '0755'
+        content: |
+          #!/bin/bash
+          # ═══════════════════════════════════════════════════════════
+          # Mattermost Backup Script
+          # ═══════════════════════════════════════════════════════════
+          
+          BACKUP_DIR="/var/backups/mattermost"
+          DATE=$(date +%Y%m%d_%H%M%S)
+          RETENTION_DAYS=7
+          
+          mkdir -p $BACKUP_DIR
+          
+          echo "Starting Mattermost backup: $(date)"
+          
+          # Database backup
+          sudo -u postgres pg_dump {{ mattermost_db_name }} | gzip > "${BACKUP_DIR}/db_${DATE}.sql.gz"
+          
+          # Data directory backup
+          tar -czf "${BACKUP_DIR}/data_${DATE}.tar.gz" -C {{ mattermost_install_dir }} data config
+          
+          # Cleanup old backups
+          find $BACKUP_DIR -name "*.gz" -mtime +${RETENTION_DAYS} -delete
+          
+          echo "Backup completed: $(date)"
+      tags: backup
+
+    - name: Setup backup cron
+      cron:
+        name: "Mattermost backup"
+        minute: "0"
+        hour: "2"
+        job: "/usr/local/bin/mattermost_backup.sh >> /var/log/mattermost-backup.log 2>&1"
+      tags: backup
+
+    #=========================================
+    # 10. Display Status
+    #=========================================
+    - name: Display summary
+      debug:
+        msg: |
+          ╔════════════════════════════════════════════════════════════════╗
+          ║              💬 Mattermost Setup Complete!                      ║
+          ╠════════════════════════════════════════════════════════════════╣
+          ║                                                                ║
+          ║  URL: {{ mattermost_site_url }}
+          ║  Version: {{ mattermost_version }}
+          ║                                                                ║
+          ║  Database: {{ mattermost_db_name }} (PostgreSQL)               ║
+          ║  Data Dir: {{ mattermost_data_dir }}
+          ║                                                                ║
+          ║  📝 Next Steps:                                                ║
+          ║    1. Open {{ mattermost_site_url }} in browser
+          ║    2. Create your first admin account                          ║
+          ║    3. Configure System Console settings                        ║
+          ║    4. Invite your team members                                 ║
+          ║                                                                ║
+          ║  📊 Service Management:                                        ║
+          ║    sudo systemctl status mattermost                            ║
+          ║    sudo systemctl restart mattermost                           ║
+          ║    sudo journalctl -u mattermost -f                            ║
+          ║                                                                ║
+          ╚════════════════════════════════════════════════════════════════╝
+      tags: always
+
+  handlers:
+    - name: Restart Mattermost
+      systemd:
+        name: mattermost
+        state: restarted
+
+    - name: Reload Nginx
+      systemd:
+        name: nginx
+        state: reloaded

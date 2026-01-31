@@ -1,0 +1,30 @@
+galaxy_info:
+  author: Your Name
+  description: Ansible role for installing and configuring Nginx web server
+  company: Your Company
+  license: MIT
+  min_ansible_version: "2.9"
+  
+  platforms:
+    - name: Ubuntu
+      versions:
+        - focal
+        - jammy
+    - name: Debian
+      versions:
+        - bullseye
+        - bookworm
+    - name: EL
+      versions:
+        - 8
+        - 9
+
+  galaxy_tags:
+    - nginx
+    - web
+    - webserver
+    - http
+    - proxy
+    - ssl
+
+dependencies: []

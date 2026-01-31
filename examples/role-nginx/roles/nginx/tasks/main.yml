@@ -1,0 +1,22 @@
+---
+# Nginx Role - Tasks
+
+- name: Include OS-specific variables
+  include_vars: "{{ ansible_os_family }}.yml"
+  tags: always
+
+- name: Install Nginx
+  import_tasks: install.yml
+  tags: nginx-install
+
+- name: Configure Nginx
+  import_tasks: configure.yml
+  tags: nginx-config
+
+- name: Configure sites
+  import_tasks: sites.yml
+  tags: nginx-sites
+
+- name: Ensure Nginx is running
+  import_tasks: service.yml
+  tags: nginx-service

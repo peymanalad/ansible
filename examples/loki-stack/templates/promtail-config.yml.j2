@@ -1,0 +1,176 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+# Promtail Configuration
+# Host: {{ inventory_hostname }}
+# ═══════════════════════════════════════════════════════════════════════════════
+
+server:
+  http_listen_port: {{ promtail_http_port }}
+  grpc_listen_port: 0
+
+#---------------------------------------
+# Positions File
+#---------------------------------------
+positions:
+  filename: /var/lib/promtail/positions.yaml
+
+#---------------------------------------
+# Loki Client
+#---------------------------------------
+clients:
+  - url: http://{{ hostvars[groups['loki'][0]]['ansible_host'] }}:{{ loki_http_port }}/loki/api/v1/push
+    tenant_id: ""
+    batchwait: 1s
+    batchsize: 1048576
+    timeout: 10s
+
+#---------------------------------------
+# Scrape Configs
+#---------------------------------------
+scrape_configs:
+
+  #---------------------------------------------------------------------------
+  # Journal (systemd logs)
+  #---------------------------------------------------------------------------
+  - job_name: journal
+    journal:
+      max_age: 12h
+      labels:
+        job: systemd-journal
+        host: {{ inventory_hostname }}
+    relabel_configs:
+      - source_labels: ['__journal__systemd_unit']
+        target_label: 'unit'
+      - source_labels: ['__journal__hostname']
+        target_label: 'hostname'
+      - source_labels: ['__journal_priority_keyword']
+        target_label: 'level'
+
+  #---------------------------------------------------------------------------
+  # /var/log/*.log
+  #---------------------------------------------------------------------------
+  - job_name: varlogs
+    static_configs:
+      - targets:
+          - localhost
+        labels:
+          job: varlogs
+          host: {{ inventory_hostname }}
+          job_type: {{ promtail_job_name | default('server') }}
+          __path__: /var/log/*.log
+
+  #---------------------------------------------------------------------------
+  # Syslog
+  #---------------------------------------------------------------------------
+  - job_name: syslog
+    static_configs:
+      - targets:
+          - localhost
+        labels:
+          job: syslog
+          host: {{ inventory_hostname }}
+          __path__: /var/log/syslog
+    pipeline_stages:
+      - regex:
+          expression: '^(?P<timestamp>\w+\s+\d+\s+\d+:\d+:\d+)\s+(?P<hostname>\S+)\s+(?P<program>[^\[]+)(?:\[(?P<pid>\d+)\])?:\s+(?P<message>.*)$'
+      - labels:
+          program:
+          pid:
+      - timestamp:
+          source: timestamp
+          format: 'Jan 2 15:04:05'
+
+  #---------------------------------------------------------------------------
+  # Auth logs
+  #---------------------------------------------------------------------------
+  - job_name: auth
+    static_configs:
+      - targets:
+          - localhost
+        labels:
+          job: auth
+          host: {{ inventory_hostname }}
+          __path__: /var/log/auth.log
+    pipeline_stages:
+      - regex:
+          expression: '^(?P<timestamp>\w+\s+\d+\s+\d+:\d+:\d+)\s+(?P<hostname>\S+)\s+(?P<program>[^\[]+)(?:\[(?P<pid>\d+)\])?:\s+(?P<message>.*)$'
+      - labels:
+          program:
+      - match:
+          selector: '{job="auth"}'
+          stages:
+            - regex:
+                expression: '(?P<action>Accepted|Failed|Invalid|session opened|session closed)'
+            - labels:
+                action:
+
+  #---------------------------------------------------------------------------
+  # Nginx Access Logs
+  #---------------------------------------------------------------------------
+  - job_name: nginx-access
+    static_configs:
+      - targets:
+          - localhost
+        labels:
+          job: nginx
+          log_type: access
+          host: {{ inventory_hostname }}
+          __path__: /var/log/nginx/access.log
+    pipeline_stages:
+      - regex:
+          expression: '^(?P<remote_addr>[\d\.]+)\s+-\s+(?P<remote_user>\S+)\s+\[(?P<time_local>[^\]]+)\]\s+"(?P<method>\w+)\s+(?P<request>[^"]+)\s+HTTP/[\d\.]+"\s+(?P<status>\d+)\s+(?P<body_bytes_sent>\d+)\s+"(?P<http_referer>[^"]*)"\s+"(?P<http_user_agent>[^"]*)"'
+      - labels:
+          method:
+          status:
+      - metrics:
+          http_request_total:
+            type: Counter
+            description: "Total HTTP requests"
+            source: status
+            config:
+              action: inc
+
+  #---------------------------------------------------------------------------
+  # Nginx Error Logs
+  #---------------------------------------------------------------------------
+  - job_name: nginx-error
+    static_configs:
+      - targets:
+          - localhost
+        labels:
+          job: nginx
+          log_type: error
+          host: {{ inventory_hostname }}
+          __path__: /var/log/nginx/error.log
+    pipeline_stages:
+      - regex:
+          expression: '^(?P<time>\d{4}/\d{2}/\d{2}\s+\d{2}:\d{2}:\d{2})\s+\[(?P<level>\w+)\]\s+(?P<pid>\d+)#(?P<tid>\d+):\s+(?P<message>.*)$'
+      - labels:
+          level:
+
+  #---------------------------------------------------------------------------
+  # Application Logs (اگر وجود داشته باشد)
+  #---------------------------------------------------------------------------
+  - job_name: application
+    static_configs:
+      - targets:
+          - localhost
+        labels:
+          job: application
+          host: {{ inventory_hostname }}
+          app: {{ promtail_job_name | default('app') }}
+          __path__: /var/log/{{ promtail_job_name | default('app') }}/*.log
+    pipeline_stages:
+      # برای JSON logs
+      - match:
+          selector: '{job="application"}'
+          stages:
+            - json:
+                expressions:
+                  level: level
+                  message: message
+                  timestamp: timestamp
+            - labels:
+                level:
+            - timestamp:
+                source: timestamp
+                format: RFC3339

@@ -1,0 +1,57 @@
+---
+# Backup System Playbook
+# بکاپ‌گیری اتوماتیک از دیتابیس و فایل‌ها
+
+all:
+  children:
+    webservers:
+      hosts:
+        web-1:
+          ansible_host: 192.168.1.10
+          backup_paths:
+            - /var/www/html
+            - /etc/nginx
+        web-2:
+          ansible_host: 192.168.1.11
+          backup_paths:
+            - /var/www/html
+            - /etc/nginx
+    
+    databases:
+      hosts:
+        db-1:
+          ansible_host: 192.168.1.20
+          mysql_databases:
+            - myapp
+            - wordpress
+          postgres_databases:
+            - analytics
+    
+    backup_server:
+      hosts:
+        backup-1:
+          ansible_host: 192.168.1.50
+  
+  vars:
+    # Backup settings
+    backup_base_dir: /var/backups
+    backup_retention_days: 30
+    backup_time: "02:00"
+    
+    # Remote backup (optional)
+    remote_backup_enabled: true
+    remote_backup_host: "{{ hostvars['backup-1'].ansible_host }}"
+    remote_backup_user: backup
+    remote_backup_path: /data/backups
+    
+    # S3 backup (optional)
+    s3_backup_enabled: false
+    s3_bucket: "my-backups"
+    s3_region: "us-east-1"
+    
+    # Encryption
+    backup_encryption_enabled: true
+    backup_encryption_key: "{{ vault_backup_key }}"
+    
+    # Notifications
+    slack_webhook: "{{ vault_slack_webhook | default('') }}"

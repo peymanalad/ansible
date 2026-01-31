@@ -1,0 +1,348 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+# 📦 RabbitMQ Cluster Deployment
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# 🎯 هدف:
+#    راه‌اندازی RabbitMQ Cluster با 3 گره برای Message Queuing
+#
+# ✅ ویژگی‌های این Setup:
+#    - High Availability با Mirrored Queues
+#    - Management Plugin برای Web UI
+#    - Prometheus Plugin برای Monitoring
+#    - TLS Support (اختیاری)
+#
+# ✅ کارهایی که انجام می‌شود:
+#    1. نصب Erlang و RabbitMQ
+#    2. کانفیگ Cluster
+#    3. ساخت Virtual Hosts و کاربران
+#    4. تنظیم HA Policy
+#    5. فعال‌سازی پلاگین‌ها
+#
+# 📋 نحوه اجرا:
+#    ansible-playbook -i inventory.yml site.yml
+#    ansible-playbook -i inventory.yml site.yml --tags install
+#    ansible-playbook -i inventory.yml site.yml --tags cluster
+#    ansible-playbook -i inventory.yml site.yml --tags users
+#
+# 📊 Tags موجود:
+#    - install: نصب RabbitMQ
+#    - config: کانفیگ RabbitMQ
+#    - cluster: ساخت Cluster
+#    - users: ساخت کاربران
+#    - policies: تنظیم HA Policies
+#
+# ═══════════════════════════════════════════════════════════════════════════════
+
+---
+# ═══════════════════════════════════════════════════════════════════════════════
+# نصب RabbitMQ روی همه گره‌ها
+# ═══════════════════════════════════════════════════════════════════════════════
+- name: نصب و کانفیگ RabbitMQ
+  hosts: rabbitmq
+  become: yes
+  tags: [install, config]
+  
+  tasks:
+    #---------------------------------------------------------------------------
+    # تنظیم /etc/hosts
+    #---------------------------------------------------------------------------
+    - name: تنظیم /etc/hosts برای همه گره‌ها
+      lineinfile:
+        path: /etc/hosts
+        line: "{{ hostvars[item]['ansible_host'] }} {{ item }}"
+        state: present
+      loop: "{{ groups['rabbitmq'] }}"
+
+    #---------------------------------------------------------------------------
+    # نصب Erlang (Debian)
+    #---------------------------------------------------------------------------
+    - name: نصب پیش‌نیازها (Debian)
+      apt:
+        name:
+          - curl
+          - gnupg
+          - apt-transport-https
+        state: present
+        update_cache: yes
+      when: ansible_os_family == 'Debian'
+
+    - name: اضافه کردن Erlang repository (Debian)
+      apt_key:
+        url: https://packages.erlang-solutions.com/ubuntu/erlang_solutions.asc
+        state: present
+      when: ansible_os_family == 'Debian'
+
+    - name: اضافه کردن RabbitMQ GPG key (Debian)
+      apt_key:
+        url: https://github.com/rabbitmq/signing-keys/releases/download/3.0/rabbitmq-release-signing-key.asc
+        state: present
+      when: ansible_os_family == 'Debian'
+
+    - name: اضافه کردن RabbitMQ repository (Debian)
+      apt_repository:
+        repo: "deb https://dl.cloudsmith.io/public/rabbitmq/rabbitmq-server/deb/ubuntu {{ ansible_distribution_release }} main"
+        state: present
+        filename: rabbitmq
+      when: ansible_os_family == 'Debian'
+
+    #---------------------------------------------------------------------------
+    # نصب Erlang و RabbitMQ
+    #---------------------------------------------------------------------------
+    - name: نصب Erlang و RabbitMQ (Debian)
+      apt:
+        name:
+          - erlang-base
+          - erlang-asn1
+          - erlang-crypto
+          - erlang-eldap
+          - erlang-ftp
+          - erlang-inets
+          - erlang-mnesia
+          - erlang-os-mon
+          - erlang-parsetools
+          - erlang-public-key
+          - erlang-runtime-tools
+          - erlang-snmp
+          - erlang-ssl
+          - erlang-syntax-tools
+          - erlang-tftp
+          - erlang-tools
+          - erlang-xmerl
+          - rabbitmq-server
+        state: present
+        update_cache: yes
+      when: ansible_os_family == 'Debian'
+
+    - name: نصب RabbitMQ (RedHat)
+      yum:
+        name: rabbitmq-server
+        state: present
+      when: ansible_os_family == 'RedHat'
+
+    #---------------------------------------------------------------------------
+    # تنظیم Erlang Cookie
+    #---------------------------------------------------------------------------
+    - name: تنظیم Erlang Cookie
+      copy:
+        content: "{{ rabbitmq_erlang_cookie }}"
+        dest: /var/lib/rabbitmq/.erlang.cookie
+        owner: rabbitmq
+        group: rabbitmq
+        mode: '0400'
+      notify: restart rabbitmq
+
+    #---------------------------------------------------------------------------
+    # کانفیگ RabbitMQ
+    #---------------------------------------------------------------------------
+    - name: کانفیگ RabbitMQ
+      template:
+        src: templates/rabbitmq.conf.j2
+        dest: /etc/rabbitmq/rabbitmq.conf
+        owner: rabbitmq
+        group: rabbitmq
+        mode: '0640'
+      notify: restart rabbitmq
+
+    - name: کانفیگ Environment
+      template:
+        src: templates/rabbitmq-env.conf.j2
+        dest: /etc/rabbitmq/rabbitmq-env.conf
+        owner: rabbitmq
+        group: rabbitmq
+        mode: '0640'
+      notify: restart rabbitmq
+
+    #---------------------------------------------------------------------------
+    # فعال‌سازی پلاگین‌ها
+    #---------------------------------------------------------------------------
+    - name: فعال‌سازی پلاگین‌ها
+      rabbitmq_plugin:
+        names:
+          - rabbitmq_management
+          - rabbitmq_prometheus
+          - rabbitmq_shovel
+          - rabbitmq_shovel_management
+        state: enabled
+      notify: restart rabbitmq
+
+    #---------------------------------------------------------------------------
+    # سرویس RabbitMQ
+    #---------------------------------------------------------------------------
+    - name: فعال‌سازی و استارت RabbitMQ
+      systemd:
+        name: rabbitmq-server
+        enabled: yes
+        state: started
+        daemon_reload: yes
+
+    - name: انتظار برای آماده شدن RabbitMQ
+      wait_for:
+        host: "{{ ansible_host }}"
+        port: "{{ rabbitmq_amqp_port }}"
+        delay: 5
+        timeout: 60
+
+  handlers:
+    - name: restart rabbitmq
+      systemd:
+        name: rabbitmq-server
+        state: restarted
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ساخت Cluster
+# ═══════════════════════════════════════════════════════════════════════════════
+- name: ساخت RabbitMQ Cluster
+  hosts: rabbitmq_slaves
+  become: yes
+  tags: [cluster]
+  serial: 1
+  
+  tasks:
+    #---------------------------------------------------------------------------
+    # پیوستن به Cluster
+    #---------------------------------------------------------------------------
+    - name: توقف RabbitMQ app
+      shell: rabbitmqctl stop_app
+
+    - name: ریست گره
+      shell: rabbitmqctl reset
+
+    - name: پیوستن به Cluster
+      shell: "rabbitmqctl join_cluster rabbit@{{ groups['rabbitmq_master'][0] }}"
+      register: join_result
+      failed_when: 
+        - join_result.rc != 0
+        - "'already_member' not in join_result.stderr"
+
+    - name: استارت RabbitMQ app
+      shell: rabbitmqctl start_app
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# تنظیم کاربران و Virtual Hosts
+# ═══════════════════════════════════════════════════════════════════════════════
+- name: تنظیم کاربران و VHosts
+  hosts: rabbitmq_master
+  become: yes
+  tags: [users]
+  
+  tasks:
+    #---------------------------------------------------------------------------
+    # حذف کاربر guest
+    #---------------------------------------------------------------------------
+    - name: حذف کاربر guest
+      rabbitmq_user:
+        user: guest
+        state: absent
+
+    #---------------------------------------------------------------------------
+    # ساخت Admin User
+    #---------------------------------------------------------------------------
+    - name: ساخت Admin User
+      rabbitmq_user:
+        user: "{{ rabbitmq_admin_user }}"
+        password: "{{ rabbitmq_admin_password }}"
+        tags: administrator
+        vhost: /
+        configure_priv: .*
+        read_priv: .*
+        write_priv: .*
+        state: present
+
+    #---------------------------------------------------------------------------
+    # ساخت Virtual Hosts
+    #---------------------------------------------------------------------------
+    - name: ساخت Virtual Hosts
+      rabbitmq_vhost:
+        name: "{{ item.name }}"
+        state: present
+      loop: "{{ rabbitmq_vhosts }}"
+
+    #---------------------------------------------------------------------------
+    # ساخت Application User
+    #---------------------------------------------------------------------------
+    - name: ساخت Application User
+      rabbitmq_user:
+        user: "{{ rabbitmq_app_user }}"
+        password: "{{ rabbitmq_app_password }}"
+        vhost: "{{ item.name }}"
+        configure_priv: .*
+        read_priv: .*
+        write_priv: .*
+        state: present
+      loop: "{{ rabbitmq_vhosts }}"
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# تنظیم HA Policies
+# ═══════════════════════════════════════════════════════════════════════════════
+- name: تنظیم HA Policies
+  hosts: rabbitmq_master
+  become: yes
+  tags: [policies]
+  
+  tasks:
+    #---------------------------------------------------------------------------
+    # ساخت HA Policy
+    #---------------------------------------------------------------------------
+    - name: ساخت HA Policy برای همه Queue ها
+      rabbitmq_policy:
+        name: ha-all
+        vhost: "{{ item.name }}"
+        pattern: .*
+        tags:
+          ha-mode: "{{ rabbitmq_ha_mode }}"
+          ha-sync-mode: "{{ rabbitmq_ha_sync_mode }}"
+        state: present
+      loop: "{{ rabbitmq_vhosts }}"
+
+    - name: ساخت HA Policy برای vhost پیش‌فرض
+      rabbitmq_policy:
+        name: ha-all
+        vhost: /
+        pattern: .*
+        tags:
+          ha-mode: "{{ rabbitmq_ha_mode }}"
+          ha-sync-mode: "{{ rabbitmq_ha_sync_mode }}"
+        state: present
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# نمایش اطلاعات نهایی
+# ═══════════════════════════════════════════════════════════════════════════════
+- name: نمایش اطلاعات نهایی
+  hosts: rabbitmq_master
+  become: yes
+  tags: [always]
+  
+  tasks:
+    - name: دریافت وضعیت Cluster
+      shell: rabbitmqctl cluster_status
+      register: cluster_status
+      changed_when: false
+
+    - name: نمایش اطلاعات دسترسی
+      debug:
+        msg: |
+          ═══════════════════════════════════════════════════════════════════
+          ✅ RabbitMQ Cluster با موفقیت راه‌اندازی شد!
+          ═══════════════════════════════════════════════════════════════════
+          
+          📊 Cluster: {{ rabbitmq_cluster_name }}
+          
+          📋 Nodes:
+          {% for host in groups['rabbitmq'] %}
+             - {{ hostvars[host]['ansible_host'] }}:{{ rabbitmq_amqp_port }}
+          {% endfor %}
+          
+          🌐 Management UI:
+             http://{{ ansible_host }}:{{ rabbitmq_management_port }}
+          
+          🔐 Admin User: {{ rabbitmq_admin_user }}
+          🔑 Admin Password: {{ rabbitmq_admin_password }}
+          
+          📝 Connection String:
+             amqp://{{ rabbitmq_app_user }}:{{ rabbitmq_app_password }}@{{ ansible_host }}:{{ rabbitmq_amqp_port }}/production
+          
+          ═══════════════════════════════════════════════════════════════════

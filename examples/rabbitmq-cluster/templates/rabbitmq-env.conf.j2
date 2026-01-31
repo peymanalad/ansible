@@ -1,0 +1,18 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+# RabbitMQ Environment Configuration
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# Node name
+NODENAME=rabbit@{{ inventory_hostname }}
+
+# Cluster port
+RABBITMQ_DIST_PORT={{ rabbitmq_cluster_port }}
+
+# Config file location
+RABBITMQ_CONFIG_FILE=/etc/rabbitmq/rabbitmq
+
+# Node IP
+RABBITMQ_NODE_IP_ADDRESS={{ ansible_host }}
+
+# Use long node names
+RABBITMQ_USE_LONGNAME=false

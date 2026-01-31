@@ -1,0 +1,9 @@
+---
+# Nginx Service Management
+
+- name: Start and enable nginx
+  systemd:
+    name: "{{ nginx_service_name }}"
+    state: "{{ nginx_service_state }}"
+    enabled: "{{ nginx_service_enabled }}"
+    daemon_reload: yes

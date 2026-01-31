@@ -1,0 +1,23 @@
+---
+# Monitoring Stack - Prometheus + Grafana + Node Exporter
+# مانیتورینگ کامل سرورها با داشبورد
+
+all:
+  children:
+    monitoring:
+      hosts:
+        monitor-server:
+          ansible_host: 192.168.1.100
+          prometheus_retention: 30d
+          grafana_admin_password: "{{ vault_grafana_password }}"
+    
+    targets:
+      hosts:
+        web-1:
+          ansible_host: 192.168.1.10
+        web-2:
+          ansible_host: 192.168.1.11
+        db-1:
+          ansible_host: 192.168.1.20
+        app-1:
+          ansible_host: 192.168.1.30

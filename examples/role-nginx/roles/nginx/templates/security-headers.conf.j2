@@ -1,0 +1,9 @@
+# {{ ansible_managed }}
+# Security Headers
+
+{% for header in nginx_add_headers %}
+add_header {{ header }} always;
+{% endfor %}
+
+# Content Security Policy (customize as needed)
+# add_header Content-Security-Policy "default-src 'self';" always;

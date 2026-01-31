@@ -1,0 +1,66 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+# 📦 Mattermost Team Collaboration Platform
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# 🎯 هدف این Playbook:
+#    نصب و راه‌اندازی Mattermost (جایگزین Slack)
+#
+# ✅ کارهایی که انجام می‌شود:
+#    1. نصب PostgreSQL به عنوان database
+#    2. دانلود و نصب Mattermost
+#    3. تنظیم Nginx به عنوان reverse proxy
+#    4. تنظیم SSL با Let's Encrypt
+#    5. تنظیم systemd service
+#    6. تنظیم backup خودکار
+#
+# 🌐 پس از نصب:
+#    - به آدرس https://mattermost.example.com بروید
+#    - اولین کاربری که ثبت نام می‌کند، admin می‌شود
+#
+# 📋 نحوه اجرا:
+#    ansible-playbook -i inventory.yml site.yml --ask-vault-pass
+#
+# ═══════════════════════════════════════════════════════════════════════════════
+
+---
+all:
+  hosts:
+    mattermost-server:
+      ansible_host: 192.168.1.70
+  
+  vars:
+    # Mattermost settings
+    mattermost_version: "9.5.1"
+    mattermost_domain: mattermost.example.com
+    mattermost_user: mattermost
+    mattermost_group: mattermost
+    mattermost_install_dir: /opt/mattermost
+    mattermost_data_dir: /opt/mattermost/data
+    
+    # Database
+    mattermost_db_name: mattermost
+    mattermost_db_user: mmuser
+    mattermost_db_password: "{{ vault_mattermost_db_password }}"
+    
+    # Site settings
+    mattermost_site_name: "My Company Chat"
+    mattermost_site_url: "https://{{ mattermost_domain }}"
+    
+    # Email settings (optional)
+    mattermost_smtp_enabled: false
+    mattermost_smtp_server: smtp.gmail.com
+    mattermost_smtp_port: 587
+    mattermost_smtp_user: ""
+    mattermost_smtp_password: ""
+    mattermost_email_from: "mattermost@example.com"
+    
+    # SSL
+    ssl_enabled: true
+    ssl_email: admin@example.com
+    
+    # Plugins
+    mattermost_plugins:
+      - name: jira
+        enabled: true
+      - name: github
+        enabled: true

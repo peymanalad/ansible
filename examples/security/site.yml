@@ -1,0 +1,346 @@
+---
+# Server Hardening Playbook
+# سخت‌سازی و امنیت سرور لینوکس
+
+- name: Harden Linux Servers
+  hosts: servers
+  become: yes
+  
+  vars:
+    # System settings
+    sysctl_security_settings:
+      # Disable IP forwarding
+      net.ipv4.ip_forward: 0
+      # Disable source routing
+      net.ipv4.conf.all.accept_source_route: 0
+      net.ipv4.conf.default.accept_source_route: 0
+      # Ignore ICMP redirects
+      net.ipv4.conf.all.accept_redirects: 0
+      net.ipv4.conf.default.accept_redirects: 0
+      # Ignore send redirects
+      net.ipv4.conf.all.send_redirects: 0
+      net.ipv4.conf.default.send_redirects: 0
+      # Enable TCP SYN cookies
+      net.ipv4.tcp_syncookies: 1
+      # Log martian packets
+      net.ipv4.conf.all.log_martians: 1
+      # Ignore ICMP broadcasts
+      net.ipv4.icmp_echo_ignore_broadcasts: 1
+      # Disable IPv6 if not needed
+      net.ipv6.conf.all.disable_ipv6: 1
+      net.ipv6.conf.default.disable_ipv6: 1
+      # Randomize virtual address space
+      kernel.randomize_va_space: 2
+  
+  tasks:
+    #=========================================
+    # 1. System Updates
+    #=========================================
+    - name: Update all packages
+      apt:
+        update_cache: yes
+        upgrade: dist
+        autoremove: yes
+      tags: updates
+
+    #=========================================
+    # 2. Install Security Tools
+    #=========================================
+    - name: Install security packages
+      apt:
+        name:
+          - fail2ban
+          - ufw
+          - unattended-upgrades
+          - apt-listchanges
+          - logwatch
+          - rkhunter
+          - chkrootkit
+          - libpam-pwquality
+          - auditd
+          - aide
+        state: present
+      tags: packages
+
+    #=========================================
+    # 3. Configure Automatic Updates
+    #=========================================
+    - name: Enable unattended upgrades
+      copy:
+        dest: /etc/apt/apt.conf.d/20auto-upgrades
+        content: |
+          APT::Periodic::Update-Package-Lists "1";
+          APT::Periodic::Unattended-Upgrade "1";
+          APT::Periodic::AutocleanInterval "7";
+        mode: '0644'
+      tags: updates
+
+    #=========================================
+    # 4. SSH Hardening
+    #=========================================
+    - name: Configure SSH
+      lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: "{{ item.regexp }}"
+        line: "{{ item.line }}"
+        state: present
+        validate: 'sshd -t -f %s'
+      loop:
+        - { regexp: '^#?Port', line: 'Port {{ ssh_port }}' }
+        - { regexp: '^#?PermitRootLogin', line: 'PermitRootLogin {{ ssh_permit_root }}' }
+        - { regexp: '^#?PasswordAuthentication', line: 'PasswordAuthentication {{ ssh_password_auth }}' }
+        - { regexp: '^#?X11Forwarding', line: 'X11Forwarding {{ ssh_x11_forwarding }}' }
+        - { regexp: '^#?MaxAuthTries', line: 'MaxAuthTries 3' }
+        - { regexp: '^#?ClientAliveInterval', line: 'ClientAliveInterval 300' }
+        - { regexp: '^#?ClientAliveCountMax', line: 'ClientAliveCountMax 2' }
+        - { regexp: '^#?LoginGraceTime', line: 'LoginGraceTime 60' }
+        - { regexp: '^#?AllowAgentForwarding', line: 'AllowAgentForwarding no' }
+        - { regexp: '^#?AllowTcpForwarding', line: 'AllowTcpForwarding no' }
+        - { regexp: '^#?Protocol', line: 'Protocol 2' }
+      notify: Restart SSH
+      tags: ssh
+
+    - name: Limit SSH users
+      lineinfile:
+        path: /etc/ssh/sshd_config
+        line: "AllowUsers {{ ssh_allowed_users | join(' ') }}"
+        state: present
+        validate: 'sshd -t -f %s'
+      notify: Restart SSH
+      tags: ssh
+
+    #=========================================
+    # 5. Firewall (UFW)
+    #=========================================
+    - name: Reset UFW to defaults
+      ufw:
+        state: reset
+      tags: firewall
+
+    - name: Set UFW default policies
+      ufw:
+        direction: "{{ item.direction }}"
+        policy: "{{ item.policy }}"
+      loop:
+        - { direction: incoming, policy: deny }
+        - { direction: outgoing, policy: allow }
+      tags: firewall
+
+    - name: Allow TCP ports
+      ufw:
+        rule: allow
+        port: "{{ item }}"
+        proto: tcp
+      loop: "{{ firewall_allowed_tcp }}"
+      tags: firewall
+
+    - name: Enable UFW
+      ufw:
+        state: enabled
+        logging: 'on'
+      tags: firewall
+
+    #=========================================
+    # 6. Fail2Ban Configuration
+    #=========================================
+    - name: Configure Fail2Ban jail
+      template:
+        src: templates/jail.local.j2
+        dest: /etc/fail2ban/jail.local
+        mode: '0644'
+      notify: Restart Fail2Ban
+      tags: fail2ban
+
+    - name: Enable and start Fail2Ban
+      systemd:
+        name: fail2ban
+        state: started
+        enabled: yes
+      tags: fail2ban
+
+    #=========================================
+    # 7. Password Policy
+    #=========================================
+    - name: Configure password quality requirements
+      lineinfile:
+        path: /etc/security/pwquality.conf
+        regexp: "{{ item.regexp }}"
+        line: "{{ item.line }}"
+      loop:
+        - { regexp: '^minlen', line: 'minlen = 12' }
+        - { regexp: '^dcredit', line: 'dcredit = -1' }
+        - { regexp: '^ucredit', line: 'ucredit = -1' }
+        - { regexp: '^lcredit', line: 'lcredit = -1' }
+        - { regexp: '^ocredit', line: 'ocredit = -1' }
+        - { regexp: '^difok', line: 'difok = 3' }
+        - { regexp: '^maxrepeat', line: 'maxrepeat = 3' }
+      tags: password
+
+    #=========================================
+    # 8. Kernel Security (sysctl)
+    #=========================================
+    - name: Apply sysctl security settings
+      sysctl:
+        name: "{{ item.key }}"
+        value: "{{ item.value }}"
+        sysctl_file: /etc/sysctl.d/99-security.conf
+        reload: yes
+      loop: "{{ sysctl_security_settings | dict2items }}"
+      tags: kernel
+
+    #=========================================
+    # 9. Disable Unused Services
+    #=========================================
+    - name: Disable unnecessary services
+      systemd:
+        name: "{{ item }}"
+        state: stopped
+        enabled: no
+      loop:
+        - cups
+        - avahi-daemon
+        - bluetooth
+      ignore_errors: yes
+      tags: services
+
+    #=========================================
+    # 10. File Permissions
+    #=========================================
+    - name: Set secure permissions on critical files
+      file:
+        path: "{{ item.path }}"
+        owner: "{{ item.owner }}"
+        group: "{{ item.group }}"
+        mode: "{{ item.mode }}"
+      loop:
+        - { path: /etc/passwd, owner: root, group: root, mode: '0644' }
+        - { path: /etc/shadow, owner: root, group: shadow, mode: '0640' }
+        - { path: /etc/group, owner: root, group: root, mode: '0644' }
+        - { path: /etc/gshadow, owner: root, group: shadow, mode: '0640' }
+        - { path: /etc/ssh/sshd_config, owner: root, group: root, mode: '0600' }
+        - { path: /boot/grub/grub.cfg, owner: root, group: root, mode: '0600' }
+      tags: permissions
+
+    #=========================================
+    # 11. Audit Configuration
+    #=========================================
+    - name: Configure auditd rules
+      copy:
+        dest: /etc/audit/rules.d/hardening.rules
+        content: |
+          # Delete all existing rules
+          -D
+          
+          # Buffer Size
+          -b 8192
+          
+          # Failure Mode
+          -f 1
+          
+          # Monitor changes to system files
+          -w /etc/passwd -p wa -k identity
+          -w /etc/shadow -p wa -k identity
+          -w /etc/group -p wa -k identity
+          -w /etc/sudoers -p wa -k scope
+          -w /etc/sudoers.d/ -p wa -k scope
+          
+          # Monitor SSH configuration
+          -w /etc/ssh/sshd_config -p wa -k sshd
+          
+          # Monitor network configuration
+          -w /etc/hosts -p wa -k network
+          -w /etc/network/ -p wa -k network
+          
+          # Monitor cron
+          -w /etc/cron.d/ -p wa -k cron
+          -w /etc/crontab -p wa -k cron
+          
+          # Monitor user commands
+          -a always,exit -F arch=b64 -S execve -k commands
+          
+          # Monitor failed access attempts
+          -a always,exit -F arch=b64 -S open -F exit=-EACCES -k access
+          -a always,exit -F arch=b64 -S open -F exit=-EPERM -k access
+        mode: '0640'
+      notify: Restart auditd
+      tags: audit
+
+    - name: Enable and start auditd
+      systemd:
+        name: auditd
+        state: started
+        enabled: yes
+      tags: audit
+
+    #=========================================
+    # 12. Logwatch Configuration
+    #=========================================
+    - name: Configure logwatch
+      copy:
+        dest: /etc/logwatch/conf/logwatch.conf
+        content: |
+          Output = mail
+          Format = html
+          MailTo = root
+          MailFrom = Logwatch@{{ ansible_fqdn }}
+          Detail = Med
+          Range = yesterday
+        mode: '0644'
+      tags: logging
+
+    #=========================================
+    # 13. Remove Dangerous Files
+    #=========================================
+    - name: Remove dangerous SUID/SGID files
+      file:
+        path: "{{ item }}"
+        mode: u-s,g-s
+      loop:
+        - /usr/bin/chsh
+        - /usr/bin/chfn
+        - /usr/bin/newgrp
+        - /bin/mount
+        - /bin/umount
+      ignore_errors: yes
+      tags: suid
+
+    #=========================================
+    # 14. Banner Configuration
+    #=========================================
+    - name: Configure login banner
+      copy:
+        dest: /etc/issue.net
+        content: |
+          ╔══════════════════════════════════════════════════════════════╗
+          ║                                                              ║
+          ║   ⚠️  AUTHORIZED ACCESS ONLY                                 ║
+          ║                                                              ║
+          ║   This system is for authorized users only.                  ║
+          ║   All activities may be monitored and recorded.              ║
+          ║   Unauthorized access will be prosecuted.                    ║
+          ║                                                              ║
+          ╚══════════════════════════════════════════════════════════════╝
+        mode: '0644'
+      tags: banner
+
+    - name: Enable SSH banner
+      lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: '^#?Banner'
+        line: 'Banner /etc/issue.net'
+      notify: Restart SSH
+      tags: banner
+
+  handlers:
+    - name: Restart SSH
+      systemd:
+        name: sshd
+        state: restarted
+
+    - name: Restart Fail2Ban
+      systemd:
+        name: fail2ban
+        state: restarted
+
+    - name: Restart auditd
+      command: service auditd restart

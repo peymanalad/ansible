@@ -1,0 +1,176 @@
+---
+# Docker Host Setup Playbook
+
+- name: Setup Docker Host
+  hosts: docker_hosts
+  become: yes
+  
+  vars:
+    docker_users:
+      - deploy
+    docker_compose_version: "2.24.0"
+    docker_registry_mirrors: []
+    docker_log_driver: "json-file"
+    docker_log_opts:
+      max-size: "100m"
+      max-file: "3"
+  
+  tasks:
+    # ===================
+    # Prerequisites
+    # ===================
+    - name: Update apt cache
+      apt:
+        update_cache: yes
+        cache_valid_time: 3600
+    
+    - name: Install prerequisites
+      apt:
+        name:
+          - apt-transport-https
+          - ca-certificates
+          - curl
+          - gnupg
+          - lsb-release
+          - software-properties-common
+          - python3-pip
+          - python3-docker
+        state: present
+    
+    # ===================
+    # Docker Installation
+    # ===================
+    - name: Add Docker GPG key
+      apt_key:
+        url: https://download.docker.com/linux/ubuntu/gpg
+        state: present
+    
+    - name: Add Docker repository
+      apt_repository:
+        repo: "deb [arch=amd64] https://download.docker.com/linux/ubuntu {{ ansible_distribution_release }} stable"
+        state: present
+        filename: docker
+    
+    - name: Install Docker
+      apt:
+        name:
+          - docker-ce
+          - docker-ce-cli
+          - containerd.io
+          - docker-buildx-plugin
+          - docker-compose-plugin
+        state: present
+        update_cache: yes
+    
+    - name: Ensure Docker service is started
+      service:
+        name: docker
+        state: started
+        enabled: yes
+    
+    # ===================
+    # Docker Configuration
+    # ===================
+    - name: Create Docker config directory
+      file:
+        path: /etc/docker
+        state: directory
+        mode: '0755'
+    
+    - name: Configure Docker daemon
+      copy:
+        content: |
+          {
+            "log-driver": "{{ docker_log_driver }}",
+            "log-opts": {{ docker_log_opts | to_nice_json }},
+            "storage-driver": "overlay2",
+            "live-restore": true,
+            "userland-proxy": false,
+            "default-address-pools": [
+              {"base": "172.17.0.0/16", "size": 24}
+            ]
+            {% if docker_registry_mirrors | length > 0 %},
+            "registry-mirrors": {{ docker_registry_mirrors | to_json }}
+            {% endif %}
+          }
+        dest: /etc/docker/daemon.json
+        mode: '0644'
+      notify: Restart Docker
+    
+    # ===================
+    # User Configuration
+    # ===================
+    - name: Create docker users
+      user:
+        name: "{{ item }}"
+        groups: docker
+        append: yes
+        shell: /bin/bash
+      loop: "{{ docker_users }}"
+    
+    - name: Add existing users to docker group
+      user:
+        name: "{{ item }}"
+        groups: docker
+        append: yes
+      loop: "{{ docker_users }}"
+      ignore_errors: yes
+    
+    # ===================
+    # Docker Compose Standalone (optional)
+    # ===================
+    - name: Install Docker Compose standalone
+      get_url:
+        url: "https://github.com/docker/compose/releases/download/v{{ docker_compose_version }}/docker-compose-linux-x86_64"
+        dest: /usr/local/bin/docker-compose
+        mode: '0755'
+      when: docker_compose_version is defined
+    
+    # ===================
+    # Cleanup
+    # ===================
+    - name: Create Docker cleanup cron job
+      cron:
+        name: "Docker cleanup"
+        minute: "0"
+        hour: "3"
+        job: "docker system prune -af --filter 'until=168h' > /dev/null 2>&1"
+        user: root
+    
+    # ===================
+    # Verification
+    # ===================
+    - name: Get Docker version
+      command: docker version --format '{{ "{{" }}.Server.Version{{ "}}" }}'
+      register: docker_version
+      changed_when: false
+    
+    - name: Get Docker Compose version
+      command: docker compose version --short
+      register: compose_version
+      changed_when: false
+    
+    - name: Show versions
+      debug:
+        msg: |
+          Docker: {{ docker_version.stdout }}
+          Docker Compose: {{ compose_version.stdout }}
+    
+    - name: Test Docker with hello-world
+      docker_container:
+        name: hello-world-test
+        image: hello-world
+        state: started
+        auto_remove: yes
+      register: hello_world
+    
+    - name: Docker installation successful
+      debug:
+        msg: "✅ Docker installed and working correctly!"
+      when: hello_world is success
+  
+  handlers:
+    - name: Restart Docker
+      service:
+        name: docker
+        state: restarted
